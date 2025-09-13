@@ -1,9 +1,8 @@
-using System.Data;
-using FluentAssertions;
-using RoboDodd.OrmLite;
-using System.ComponentModel.DataAnnotations;
+﻿using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using System.Data;
 using Dapper;
+using FluentAssertions;
 
 namespace RoboDodd.OrmLite.Tests;
 
@@ -13,8 +12,16 @@ namespace RoboDodd.OrmLite.Tests;
 [Collection("MySQL Collection")]
 public class MySqlDdlOperationTests : DdlOperationTestsBase
 {
+    private readonly MySqlFixture _fixture;
+    
     public MySqlDdlOperationTests(MySqlFixture fixture) : base(fixture.ConnectionFactory, isMySQL: true)
     {
+        _fixture = fixture;
+    }
+    
+    protected override async Task<IDbConnection> CreateFreshConnectionAsync()
+    {
+        return await _fixture.CreateFreshDatabaseConnectionAsync();
     }
 }
 
@@ -24,8 +31,16 @@ public class MySqlDdlOperationTests : DdlOperationTestsBase
 [Collection("SQLite Collection")]
 public class SqliteDdlOperationTests : DdlOperationTestsBase
 {
+    private readonly SqliteFixture _fixture;
+    
     public SqliteDdlOperationTests(SqliteFixture fixture) : base(fixture.ConnectionFactory, isMySQL: false)
     {
+        _fixture = fixture;
+    }
+    
+    protected override async Task<IDbConnection> CreateFreshConnectionAsync()
+    {
+        return await Task.FromResult(_fixture.CreateFreshDatabaseConnection());
     }
 }
 
@@ -44,11 +59,13 @@ public abstract class DdlOperationTestsBase : IDisposable
         IsMySQL = isMySQL;
         _connection = ConnectionFactory.CreateDbConnection();
         _connection.Open();
-        
+
         // Clean up any existing test data
         CleanupTestData();
     }
-    
+
+    protected abstract Task<IDbConnection> CreateFreshConnectionAsync();
+
     private void CleanupTestData()
     {
         try
@@ -56,7 +73,7 @@ public abstract class DdlOperationTestsBase : IDisposable
             var isMySql = IsMySQL;
             var tableNames = new[] { "test_users", "test_posts", "test_categories", "ddl_test_models" };
             var orderTable = isMySql ? "`Order`" : "[Order]";
-            
+
             foreach (var table in tableNames)
             {
                 var escapedTable = isMySql ? $"`{table}`" : $"[{table}]";
@@ -80,7 +97,7 @@ public abstract class DdlOperationTestsBase : IDisposable
     {
         // Arrange
         var tableName = "ddl_test_table_" + Guid.NewGuid().ToString("N")[..8];
-        
+
         // Act
         await _connection.CreateTableIfNotExistsAsync<DdlTestModel>();
 
@@ -124,15 +141,15 @@ public abstract class DdlOperationTestsBase : IDisposable
         tableExists.Should().BeTrue();
 
         // Test that we can use the indexed columns effectively
-        var user = new TestUser 
-        { 
-            Name = "Index Test", 
-            Email = "indextest@example.com", 
-            Age = 25, 
+        var user = new TestUser
+        {
+            Name = "Index Test",
+            Email = "indextest@example.com",
+            Age = 25,
             Balance = 1000m,
-            IsActive = true 
+            IsActive = true
         };
-        
+
         var id = await _connection.InsertAsync(user, selectIdentity: true);
         id.Should().BeGreaterThan(0);
 
@@ -149,17 +166,17 @@ public abstract class DdlOperationTestsBase : IDisposable
         await _connection.CreateTableIfNotExistsAsync<TestUser>();
 
         // Assert - Test that custom field (Balance as DECIMAL(10,2)) works correctly
-        var user = new TestUser 
-        { 
-            Name = "Custom Field Test", 
-            Email = "customfield@example.com", 
+        var user = new TestUser
+        {
+            Name = "Custom Field Test",
+            Email = "customfield@example.com",
             Age = 30,
             Balance = 123.45m // Test precision
         };
 
         var id = await _connection.InsertAsync(user, selectIdentity: true);
         var retrieved = await _connection.SingleByIdAsync<TestUser>(id);
-        
+
         retrieved.Should().NotBeNull();
         retrieved!.Balance.Should().Be(123.45m); // Should maintain decimal precision
     }
@@ -171,10 +188,10 @@ public abstract class DdlOperationTestsBase : IDisposable
         await _connection.CreateTableIfNotExistsAsync<TestUser>();
 
         // Act - Insert with explicit values
-        var user = new TestUser 
-        { 
-            Name = "Default Test", 
-            Email = "default@example.com", 
+        var user = new TestUser
+        {
+            Name = "Default Test",
+            Email = "default@example.com",
             Age = 25,
             Balance = 1000m,
             IsActive = true, // Explicitly set the value we expect
@@ -212,7 +229,7 @@ public abstract class DdlOperationTestsBase : IDisposable
         // Query using composite index columns (Email and IsActive)
         var activeUsers = await _connection.SelectAsync<TestUser>(u => u.IsActive);
         activeUsers.Should().HaveCount(2);
-        
+
         var specificUser = await _connection.SingleAsync<TestUser>(u => u.Email == "user2@example.com" && !u.IsActive);
         specificUser.Should().NotBeNull();
         specificUser!.Name.Should().Be("User2");
@@ -247,7 +264,7 @@ public abstract class DdlOperationTestsBase : IDisposable
     {
         // Arrange
         await _connection.CreateTableIfNotExistsAsync<TestUser>();
-        
+
         var users = new[]
         {
             new TestUser { Name = "SQL User 1", Email = "sql1@example.com", Age = 25, Balance = 1000m },
@@ -263,9 +280,9 @@ public abstract class DdlOperationTestsBase : IDisposable
         var tableName = IsMySQL ? "`test_users`" : "[test_users]";
         var nameColumn = IsMySQL ? "`Name`" : "[Name]";
         var ageColumn = IsMySQL ? "`Age`" : "[Age]";
-        
+
         var results = await _connection.SqlListAsync<TestUser>(
-            $"SELECT * FROM {tableName} WHERE {ageColumn} > @MinAge ORDER BY {nameColumn}", 
+            $"SELECT * FROM {tableName} WHERE {ageColumn} > @MinAge ORDER BY {nameColumn}",
             new { MinAge = 28 });
 
         // Assert
@@ -278,7 +295,7 @@ public abstract class DdlOperationTestsBase : IDisposable
     {
         // Arrange
         await _connection.CreateTableIfNotExistsAsync<TestUser>();
-        
+
         var users = new[]
         {
             new TestUser { Name = "Count User 1", Email = "count1@example.com", Age = 25, Balance = 1000m },
@@ -294,9 +311,9 @@ public abstract class DdlOperationTestsBase : IDisposable
         // Act
         var tableName = IsMySQL ? "`test_users`" : "[test_users]";
         var ageColumn = IsMySQL ? "`Age`" : "[Age]";
-        
+
         var count = await _connection.ScalarAsync<int>(
-            $"SELECT COUNT(*) FROM {tableName} WHERE {ageColumn} >= @MinAge", 
+            $"SELECT COUNT(*) FROM {tableName} WHERE {ageColumn} >= @MinAge",
             new { MinAge = 30 });
 
         // Assert
@@ -308,7 +325,7 @@ public abstract class DdlOperationTestsBase : IDisposable
     {
         // Arrange
         await _connection.CreateTableIfNotExistsAsync<TestUser>();
-        
+
         var users = new[]
         {
             new TestUser { Name = "Column User 1", Email = "column1@example.com", Age = 25, Balance = 1500m },
@@ -324,9 +341,9 @@ public abstract class DdlOperationTestsBase : IDisposable
         // Act
         var tableName = IsMySQL ? "`test_users`" : "[test_users]";
         var balanceColumn = IsMySQL ? "`Balance`" : "[Balance]";
-        
+
         var balances = await _connection.ColumnAsync<decimal>(
-            $"SELECT {balanceColumn} FROM {tableName} WHERE {balanceColumn} > @MinBalance ORDER BY {balanceColumn}", 
+            $"SELECT {balanceColumn} FROM {tableName} WHERE {balanceColumn} > @MinBalance ORDER BY {balanceColumn}",
             new { MinBalance = 2000m });
 
         // Assert
@@ -334,6 +351,91 @@ public abstract class DdlOperationTestsBase : IDisposable
         balances.Should().BeInAscendingOrder();
         balances.First().Should().Be(2500m);
         balances.Last().Should().Be(3500m);
+    }
+
+    [Fact]
+    public async Task CreateTableIfNotExists_WithServiceStackAttributes_CreatesTableWithCorrectSchema()
+    {
+        // Arrange - Use fresh database connection for clean state
+        using var connection = await CreateFreshConnectionAsync();
+
+        // Act
+        var created = await connection.CreateTableIfNotExistsAsync<ServiceStackCompatibleUserB>();
+
+        // Assert
+        created.Should().BeTrue();
+
+        // Verify table structure
+        var tableExists = await connection.TableExistsAsync<ServiceStackCompatibleUserB>();
+        tableExists.Should().BeTrue();
+
+        // Test that calling again returns false (table already exists)
+        var createdAgain = await connection.CreateTableIfNotExistsAsync<ServiceStackCompatibleUserB>();
+        createdAgain.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task CreateTableIfNotExists_SynchronousVersion_WorksCorrectly()
+    {
+        // Arrange - Use fresh database connection for clean state
+        using var connection = await CreateFreshConnectionAsync();
+
+        // Act
+        var created = connection.CreateTableIfNotExists<ServiceStackCompatibleUser>();
+
+        // Assert
+        created.Should().BeTrue();
+
+        // Verify table exists
+        var tableExists = await connection.TableExistsAsync<ServiceStackCompatibleUser>();
+        tableExists.Should().BeTrue();
+
+        // Test that calling again returns false
+        var createdAgain = connection.CreateTableIfNotExists<ServiceStackCompatibleUser>();
+        createdAgain.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task CompositeIndex_CreatesMultipleIndexes()
+    {
+        // Arrange
+        using var connection = ConnectionFactory.CreateDbConnection();
+
+        await connection.DropTableIfExistsAsync<TaskItem>();
+        // Act
+        var created = await connection.CreateTableIfNotExistsAsync<TaskItem>();
+
+        // Assert
+        created.Should().BeTrue();
+
+        // Verify table was created (indexes are created as part of table creation)
+        var tableExists = await connection.TableExistsAsync<TaskItem>();
+        tableExists.Should().BeTrue();
+
+        // Test inserting data to verify schema works
+        var task = new TaskItem
+        {
+            Title = "Test Task",
+            Description = "Test Description",
+            Status = "New",
+            Priority = 1
+        };
+
+        var insertedId = await connection.InsertAsync(task, selectIdentity: true);
+        insertedId.Should().BeGreaterThan(0);
+    }
+
+    [Fact]
+    public void GetTableName_ReturnsCorrectTableNames()
+    {
+        // Act & Assert
+        DapperOrmLiteExtensions.GetTableName<ServiceStackCompatibleUser>().Should().Be("ServiceStackCompatibleUser");
+        DapperOrmLiteExtensions.GetTableName<TestUser>().Should().Be("test_users");
+        DapperOrmLiteExtensions.GetTableName<UserProfile>().Should().Be("UserProfile");
+
+        // Test with Type parameter
+        DapperOrmLiteExtensions.GetTableName(typeof(BlogPost)).Should().Be("BlogPost");
+        DapperOrmLiteExtensions.GetTableName(typeof(TestCategory)).Should().Be("test_categories");
     }
 }
 
@@ -346,17 +448,17 @@ public class DdlTestModel
     [Key]
     [DatabaseGenerated(DatabaseGeneratedOption.Identity)]
     public int Id { get; set; }
-    
+
     [Required]
     [StringLength(100)]
     public string Name { get; set; } = null!;
-    
+
     [Index("IX_DdlTest_Code")]
     public string Code { get; set; } = null!;
-    
+
     [Default(typeof(DateTime), "CURRENT_TIMESTAMP")]
     public DateTime CreatedAt { get; set; }
-    
+
     [CustomField("TEXT")]
     public string? LongText { get; set; }
 }

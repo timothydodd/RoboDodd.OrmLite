@@ -3,6 +3,29 @@ using System.ComponentModel.DataAnnotations;
 namespace RoboDodd.OrmLite
 {
     /// <summary>
+    /// Attribute to mark a property as a primary key
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property, AllowMultiple = false)]
+    public class PrimaryKeyAttribute : Attribute
+    {
+    }
+
+    /// <summary>
+    /// Attribute to mark a property as auto-incrementing
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property, AllowMultiple = false)]
+    public class AutoIncrementAttribute : Attribute
+    {
+    }
+
+    /// <summary>
+    /// Attribute to mark a property to be ignored by the ORM
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property, AllowMultiple = false)]
+    public class IgnoreAttribute : Attribute
+    {
+    }
+    /// <summary>
     /// Attribute to mark a property as needing a database index
     /// </summary>
     [AttributeUsage(AttributeTargets.Property, AllowMultiple = false)]
@@ -36,21 +59,14 @@ namespace RoboDodd.OrmLite
     [AttributeUsage(AttributeTargets.Class, AllowMultiple = true)]
     public class CompositeIndexAttribute : Attribute
     {
-        public string Name { get; }
-        public string[] Properties { get; }
-        public bool IsUnique { get; set; }
+        public string Name { get; set; }
+        public string[] FieldNames { get; }
+        public bool Unique { get; set; }
         
-        public CompositeIndexAttribute(string name, params string[] properties)
+        public CompositeIndexAttribute(params string[] fieldNames)
         {
-            Name = name;
-            Properties = properties;
-        }
-        
-        public CompositeIndexAttribute(string name, bool isUnique, params string[] properties)
-        {
-            Name = name;
-            Properties = properties;
-            IsUnique = isUnique;
+            FieldNames = fieldNames;
+            Name = string.Join("_", fieldNames) + "_idx";
         }
     }
 
@@ -88,5 +104,42 @@ namespace RoboDodd.OrmLite
             Type = type;
             Expression = expression;
         }
+    }
+
+    /// <summary>
+    /// ServiceStack-compatible ForeignKey attribute with cascade options
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property, AllowMultiple = false)]
+    public class ReferenceAttribute : Attribute
+    {
+        public Type? ForeignType { get; }
+        public string? ForeignTableName { get; }
+        public string? OnDelete { get; set; }
+        public string? OnUpdate { get; set; }
+        
+        public ReferenceAttribute(Type foreignType)
+        {
+            ForeignType = foreignType;
+        }
+        
+        public ReferenceAttribute(string foreignTableName)
+        {
+            ForeignTableName = foreignTableName;
+        }
+        
+        public ReferenceAttribute(Type foreignType, string onDelete)
+        {
+            ForeignType = foreignType;
+            OnDelete = onDelete;
+        }
+    }
+
+    /// <summary>
+    /// Alias for ServiceStack ForeignKey with cascade options
+    /// </summary>
+    public class ForeignKeyAttribute : ReferenceAttribute
+    {
+        public ForeignKeyAttribute(Type foreignType) : base(foreignType) { }
+        public ForeignKeyAttribute(Type foreignType, string onDelete) : base(foreignType, onDelete) { }
     }
 }

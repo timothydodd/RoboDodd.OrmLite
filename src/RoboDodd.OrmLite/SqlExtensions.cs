@@ -6,39 +6,6 @@ namespace RoboDodd.OrmLite
 {
     public static class SqlExtensions
     {
-        public static void AddIfNotNull(this DynamicParameters dynamicParameters,
-                                        string name,
-                                        object value)
-        {
-            if (value != null)
-            {
-                dynamicParameters.Add($"@{name}", value);
-            }
-        }
-        /// <summary>
-        /// Adds a list of parameters to the dyanmicParameter. 
-        /// Used in situations where you need  many parameters within a SQL 'where in' clause.
-        /// </summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="dynamicParameters"></param>
-        /// <param name="items"></param>
-        /// <param name="name"></param>
-        /// <returns></returns>
-        public static List<string> AddList<T>(this DynamicParameters dynamicParameters, IEnumerable<T> items, string name)
-        {
-            var unItems = items.Distinct().ToList();
-
-            var Keys = new List<string>();
-            for (var index = 0; index < unItems.Count; index++)
-            {
-                T guid = unItems[index];
-                var key = $"{name}{index}";
-
-                Keys.Add($"@{key}");
-                dynamicParameters.Add(key, guid);
-            }
-            return Keys;
-        }
 
         public static List<string> GetSqlFilters<T>(this object obj)
         {

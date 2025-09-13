@@ -368,4 +368,121 @@ public abstract class CrudOperationTestsBase : IDisposable
         var deleteRows = await _connection.DeleteAsync(order);
         deleteRows.Should().Be(1);
     }
+
+    [Fact]
+    public async Task InsertAsync_WithAutoIncrement_ReturnsGeneratedId()
+    {
+        // Arrange
+        var user = new ServiceStackCompatibleUser
+        {
+            Name = "Test User",
+            Email = "test@example.com",
+            CreatedAt = DateTime.UtcNow
+        };
+
+        // Act
+        var insertedId = await _connection.InsertAsync(user, selectIdentity: true);
+
+        // Assert
+        insertedId.Should().BeGreaterThan(0);
+        user.Id = (int)insertedId;
+
+        // Verify the record was inserted
+        var retrieved = await _connection.SingleByIdAsync<ServiceStackCompatibleUser>(insertedId);
+        retrieved.Should().NotBeNull();
+        retrieved!.Name.Should().Be(user.Name);
+        retrieved.Email.Should().Be(user.Email);
+    }
+
+    [Fact]
+    public async Task LastInsertId_AfterInsert_ReturnsCorrectId()
+    {
+        // Arrange
+        var user = new ServiceStackCompatibleUser
+        {
+            Name = "Last Insert ID Test",
+            Email = "lastid@example.com"
+        };
+
+        // Act
+        await _connection.InsertAsync(user);
+        var lastId = _connection.LastInsertId();
+
+        // Assert
+        lastId.Should().BeGreaterThan(0);
+
+        // Verify it matches the inserted record
+        var retrieved = await _connection.SingleByIdAsync<ServiceStackCompatibleUser>(lastId);
+        retrieved.Should().NotBeNull();
+        retrieved!.Name.Should().Be(user.Name);
+    }
+
+    [Fact]
+    public async Task ExistsAsync_ShouldReturnTrue_WhenRecordExists()
+    {
+        // Arrange
+        var user = new TestUser { Name = "Exists Test", Email = "exists@example.com", Age = 25, Balance = 1000m };
+        var id = await _connection.InsertAsync(user, selectIdentity: true);
+
+        // Act
+        var exists = await _connection.ExistsAsync<TestUser>(id);
+
+        // Assert
+        exists.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ExistsAsync_ShouldReturnFalse_WhenRecordDoesNotExist()
+    {
+        // Act
+        var exists = await _connection.ExistsAsync<TestUser>(99999);
+
+        // Assert
+        exists.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task CountAsync_WithPredicate_ShouldReturnCorrectCount()
+    {
+        // Arrange - Insert test data
+        var users = new[]
+        {
+            new TestUser { Name = "Count User 1", Email = "count1@example.com", Age = 25, Balance = 1000m },
+            new TestUser { Name = "Count User 2", Email = "count2@example.com", Age = 30, Balance = 2000m },
+            new TestUser { Name = "Count User 3", Email = "count3@example.com", Age = 35, Balance = 3000m }
+        };
+
+        foreach (var user in users)
+        {
+            await _connection.InsertAsync(user);
+        }
+
+        // Act
+        var count = await _connection.CountAsync<TestUser>(u => u.Age >= 30);
+
+        // Assert
+        count.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task CountAsync_WithoutPredicate_ShouldReturnTotalCount()
+    {
+        // Arrange - Insert test data
+        var users = new[]
+        {
+            new TestUser { Name = "Total Count 1", Email = "total1@example.com", Age = 25, Balance = 1000m },
+            new TestUser { Name = "Total Count 2", Email = "total2@example.com", Age = 30, Balance = 2000m }
+        };
+
+        foreach (var user in users)
+        {
+            await _connection.InsertAsync(user);
+        }
+
+        // Act
+        var totalCount = await _connection.CountAsync<TestUser>();
+
+        // Assert
+        totalCount.Should().BeGreaterThanOrEqualTo(2);
+    }
 }

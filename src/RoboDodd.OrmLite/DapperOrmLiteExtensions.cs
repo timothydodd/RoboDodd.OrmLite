@@ -424,33 +424,6 @@ namespace RoboDodd.OrmLite
 
         #region DDL Operations
 
-        public static async Task CreateTableIfNotExistsAsync<T>(this IDbConnection connection)
-        {
-            var tableName = GetTableName<T>();
-            var type = typeof(T);
-            var properties = type.GetProperties().Where(p => !p.GetCustomAttributes<NotMappedAttribute>().Any()).ToArray();
-
-            var isMySql = connection.GetType().Name.Contains("MySql");
-
-            var sql = BuildCreateTableSql<T>(tableName, properties, isMySql);
-            await connection.ExecuteAsync(sql);
-
-            // Create indexes
-            var indexSqls = BuildIndexSqls<T>(tableName, isMySql);
-            foreach (var indexSql in indexSqls)
-            {
-                try
-                {
-                    await connection.ExecuteAsync(indexSql);
-                }
-                catch (Exception ex) when (isMySql && (ex.Message.Contains("Duplicate key name") || ex.Message.Contains("already exists")))
-                {
-                    // MySQL: Index already exists, ignore this error
-                    continue;
-                }
-            }
-        }
-
         public static async Task<bool> TableExistsAsync<T>(this IDbConnection connection)
         {
             var tableName = GetTableName<T>();
@@ -481,6 +454,28 @@ namespace RoboDodd.OrmLite
 
             var count = await connection.QuerySingleAsync<int>(sql, new { TableName = tableName });
             return count > 0;
+        }
+
+        public static async Task<bool> DropTableIfExistsAsync<T>(this IDbConnection connection)
+        {
+            var tableName = GetTableName<T>();
+            var isMySql = connection.GetType().Name.Contains("MySql");
+            var escapedTableName = EscapeTableName(tableName, isMySql);
+
+            string sql = $"DROP TABLE IF EXISTS {escapedTableName}";
+            await connection.ExecuteAsync(sql);
+            return true;
+        }
+
+        public static bool DropTableIfExists<T>(this IDbConnection connection)
+        {
+            var tableName = GetTableName<T>();
+            var isMySql = connection.GetType().Name.Contains("MySql");
+            var escapedTableName = EscapeTableName(tableName, isMySql);
+
+            string sql = $"DROP TABLE IF EXISTS {escapedTableName}";
+            connection.Execute(sql);
+            return true;
         }
 
         #endregion
@@ -517,9 +512,13 @@ namespace RoboDodd.OrmLite
 
         #region Helper Methods
 
-        private static string GetTableName<T>()
+        public static string GetTableName<T>()
         {
-            var type = typeof(T);
+            return GetTableName(typeof(T));
+        }
+
+        public static string GetTableName(Type type)
+        {
             var tableAttribute = type.GetCustomAttribute<TableAttribute>();
             return tableAttribute?.Name ?? type.Name;
         }
@@ -539,7 +538,9 @@ namespace RoboDodd.OrmLite
             return type.GetProperties()
                 .Where(p => p.CanWrite &&
                            !p.GetCustomAttributes<NotMappedAttribute>().Any() &&
-                           !p.GetCustomAttributes<DatabaseGeneratedAttribute>().Any())
+                           !p.GetCustomAttributes<DatabaseGeneratedAttribute>().Any() &&
+                           !p.GetCustomAttributes<IgnoreAttribute>().Any() &&
+                           !p.GetCustomAttributes<AutoIncrementAttribute>().Any())
                 .ToArray();
         }
 
@@ -586,7 +587,7 @@ namespace RoboDodd.OrmLite
                 .ToArray();
         }
 
-        private static (string whereClause, object parameters) BuildWhereClause<T>(Expression<Func<T, bool>> predicate, bool isMySql = false)
+        public static (string whereClause, object parameters) BuildWhereClause<T>(Expression<Func<T, bool>> predicate, bool isMySql = false)
         {
             // Simple expression parser for basic conditions
             // This is a simplified version - you might want to expand this for more complex expressions
@@ -610,91 +611,122 @@ namespace RoboDodd.OrmLite
             sb.AppendLine($"CREATE TABLE IF NOT EXISTS {escapedTableName} (");
 
             var columnDefinitions = new List<string>();
+            var primaryKeys = new List<string>();
+            var allPrimaryKeys = properties.Where(p => p.GetCustomAttribute<KeyAttribute>() != null).ToList();
+            string? autoIncrementColumn = null;
 
             foreach (var property in properties)
             {
-                var columnDef = BuildColumnDefinition(property, isMySql);
+                var escapedColumnName = EscapeColumnName(property.Name, isMySql);
+                var columnDef = new StringBuilder($"{escapedColumnName} ");
+
+                // Check for custom field type
+                var customField = property.GetCustomAttribute<CustomFieldAttribute>();
+                if (customField != null)
+                {
+                    columnDef.Append(customField.FieldType);
+                }
+                else
+                {
+                    columnDef.Append(GetColumnType(property.PropertyType, isMySql));
+                }
+
+                // Check for primary key and auto-increment
+                var isPrimaryKey = property.GetCustomAttribute<KeyAttribute>() != null;
+                var isAutoIncrement = property.GetCustomAttribute<DatabaseGeneratedAttribute>()?.DatabaseGeneratedOption == DatabaseGeneratedOption.Identity;
+                var propType = property.PropertyType;
+
+                if (isPrimaryKey)
+                {
+                    primaryKeys.Add(escapedColumnName);
+                    
+                    // Handle auto-increment differently for MySQL vs SQLite
+                    if ((propType == typeof(int) || propType == typeof(long)) && isAutoIncrement)
+                    {
+                        if (isMySql)
+                        {
+                            columnDef.Append(" AUTO_INCREMENT");
+                        }
+                        else
+                        {
+                            // For SQLite, we need to handle this specially
+                            autoIncrementColumn = escapedColumnName;
+                            columnDef.Append(" PRIMARY KEY AUTOINCREMENT");
+                        }
+                    }
+                    else if (!isMySql && allPrimaryKeys.Count == 1)
+                    {
+                        // For SQLite single primary key without autoincrement
+                        columnDef.Append(" PRIMARY KEY");
+                    }
+                }
+
+                // Check for required/not null
+                var isRequired = property.GetCustomAttribute<RequiredAttribute>() != null;
+                var isNullable = Nullable.GetUnderlyingType(property.PropertyType) != null ||
+                               property.PropertyType == typeof(string) ||
+                               property.PropertyType.IsClass;
+
+                if ((!isNullable || isRequired) && !(isPrimaryKey && isAutoIncrement))
+                {
+                    columnDef.Append(" NOT NULL");
+                }
+
+                // Check for default value
+                var defaultAttr = property.GetCustomAttribute<DefaultAttribute>();
+                if (defaultAttr != null)
+                {
+                    if (defaultAttr.Expression != null && defaultAttr.Type == typeof(DateTime))
+                    {
+                        if (defaultAttr.Expression == "CURRENT_TIMESTAMP")
+                        {
+                            columnDef.Append(isMySql ? " DEFAULT CURRENT_TIMESTAMP" : " DEFAULT CURRENT_TIMESTAMP");
+                        }
+                    }
+                    else if (defaultAttr.Value != null)
+                    {
+                        var defaultValue = defaultAttr.Value;
+                        if (defaultValue is string)
+                        {
+                            columnDef.Append($" DEFAULT '{defaultValue}'");
+                        }
+                        else if (defaultValue is bool boolVal)
+                        {
+                            columnDef.Append($" DEFAULT {(boolVal ? 1 : 0)}");
+                        }
+                        else
+                        {
+                            columnDef.Append($" DEFAULT {defaultValue}");
+                        }
+                    }
+                }
+
                 columnDefinitions.Add($"    {columnDef}");
             }
 
             sb.AppendLine(string.Join(",\n", columnDefinitions));
+
+            // Add primary key constraint (only for MySQL or multi-column primary keys in SQLite)
+            if (primaryKeys.Any())
+            {
+                if (isMySql)
+                {
+                    // MySQL always needs separate PRIMARY KEY constraint
+                    sb.AppendLine($",    PRIMARY KEY ({string.Join(", ", primaryKeys)})");
+                }
+                else if (primaryKeys.Count > 1)
+                {
+                    // SQLite composite primary key
+                    sb.AppendLine($",    PRIMARY KEY ({string.Join(", ", primaryKeys)})");
+                }
+                // For SQLite single primary key, it's already defined inline in the column definition
+            }
+
             sb.Append(")");
 
             if (isMySql)
             {
                 sb.Append(" ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-            }
-
-            return sb.ToString();
-        }
-
-        private static string BuildColumnDefinition(PropertyInfo property, bool isMySql)
-        {
-            var columnName = EscapeColumnName(property.Name, isMySql);
-            var sb = new StringBuilder($"{columnName} ");
-
-            // Check for custom field type
-            var customField = property.GetCustomAttribute<CustomFieldAttribute>();
-            if (customField != null)
-            {
-                sb.Append(customField.FieldType);
-            }
-            else
-            {
-                sb.Append(GetColumnType(property.PropertyType, isMySql));
-            }
-
-            // Check for primary key
-            var isKey = property.GetCustomAttribute<KeyAttribute>() != null;
-            var isAutoIncrement = property.GetCustomAttribute<DatabaseGeneratedAttribute>()?.DatabaseGeneratedOption == DatabaseGeneratedOption.Identity;
-
-            if (isKey)
-            {
-                sb.Append(" PRIMARY KEY");
-                if (isAutoIncrement)
-                {
-                    sb.Append(isMySql ? " AUTO_INCREMENT" : " AUTOINCREMENT");
-                }
-            }
-
-            // Check for required/not null
-            var isRequired = property.GetCustomAttribute<RequiredAttribute>() != null;
-            var isNullable = Nullable.GetUnderlyingType(property.PropertyType) != null ||
-                           property.PropertyType == typeof(string) ||
-                           property.PropertyType.IsClass;
-
-            if (!isNullable || isRequired)
-            {
-                sb.Append(" NOT NULL");
-            }
-
-            // Check for default value
-            var defaultAttr = property.GetCustomAttribute<DefaultAttribute>();
-            if (defaultAttr != null)
-            {
-                if (defaultAttr.Expression != null && defaultAttr.Type == typeof(DateTime))
-                {
-                    if (defaultAttr.Expression == "CURRENT_TIMESTAMP")
-                    {
-                        sb.Append(isMySql ? " DEFAULT CURRENT_TIMESTAMP" : " DEFAULT CURRENT_TIMESTAMP");
-                    }
-                }
-                else if (defaultAttr.Value != null)
-                {
-                    var defaultValue = defaultAttr.Value;
-                    if (defaultValue is string)
-                    {
-                        sb.Append($" DEFAULT '{defaultValue}'");
-                    }
-                    else if (defaultValue is bool boolVal)
-                    {
-                        sb.Append($" DEFAULT {(boolVal ? 1 : 0)}");
-                    }
-                    else
-                    {
-                        sb.Append($" DEFAULT {defaultValue}");
-                    }
-                }
             }
 
             return sb.ToString();
@@ -751,8 +783,8 @@ namespace RoboDodd.OrmLite
             var compositeIndexes = type.GetCustomAttributes<CompositeIndexAttribute>();
             foreach (var compositeIndex in compositeIndexes)
             {
-                var unique = compositeIndex.IsUnique ? "UNIQUE " : "";
-                var escapedColumns = string.Join(", ", compositeIndex.Properties.Select(col => EscapeColumnName(col, isMySql)));
+                var unique = compositeIndex.Unique ? "UNIQUE " : "";
+                var escapedColumns = string.Join(", ", compositeIndex.FieldNames.Select(col => EscapeColumnName(col, isMySql)));
                 var escapedTableName = EscapeTableName(tableName, isMySql);
                 string sql;
                 if (isMySql)
@@ -770,7 +802,7 @@ namespace RoboDodd.OrmLite
             return indexSqls;
         }
 
-        private static string EscapeTableName(string tableName, bool isMySql)
+        public static string EscapeTableName(string tableName, bool isMySql)
         {
             if (isMySql)
             {
@@ -811,5 +843,390 @@ namespace RoboDodd.OrmLite
         }
 
         #endregion
+
+        #region Additional ServiceStack Compatibility Methods
+
+        /// <summary>
+        /// Gets the last inserted ID (for compatibility with ServiceStack)
+        /// </summary>
+        public static long LastInsertId(this IDbConnection connection)
+        {
+            var isMySql = connection.GetType().Name.Contains("MySql");
+            var sql = isMySql ? "SELECT LAST_INSERT_ID()" : "SELECT last_insert_rowid()";
+            return connection.QuerySingle<long>(sql);
+        }
+
+        /// <summary>
+        /// Creates a table if it doesn't exist
+        /// </summary>
+        public static bool CreateTableIfNotExists<T>(this IDbConnection connection)
+        {
+            var tableName = GetTableName<T>();
+            var isMySql = connection.GetType().Name.Contains("MySql");
+            var escapedTableName = EscapeTableName(tableName, isMySql);
+            
+            // Check if table exists
+            string checkTableSql;
+            if (isMySql)
+            {
+                checkTableSql = $"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '{tableName}'";
+            }
+            else
+            {
+                checkTableSql = $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{tableName}'";
+            }
+            
+            var exists = connection.QuerySingle<int>(checkTableSql) > 0;
+            if (exists)
+                return false;
+            
+            // Create table
+            var sql = BuildCreateTableSql<T>(isMySql);
+            connection.Execute(sql);
+            return true;
+        }
+
+        /// <summary>
+        /// Creates a table if it doesn't exist (async version)
+        /// </summary>
+        public static async Task<bool> CreateTableIfNotExistsAsync<T>(this IDbConnection connection)
+        {
+            var tableName = GetTableName<T>();
+            var isMySql = connection.GetType().Name.Contains("MySql");
+            var escapedTableName = EscapeTableName(tableName, isMySql);
+            
+            // Check if table exists
+            string checkTableSql;
+            if (isMySql)
+            {
+                checkTableSql = $"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '{tableName}'";
+            }
+            else
+            {
+                checkTableSql = $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{tableName}'";
+            }
+            
+            var exists = await connection.QuerySingleAsync<int>(checkTableSql) > 0;
+            if (exists)
+                return false;
+            
+            // Create table
+            var sql = BuildCreateTableSql<T>(isMySql);
+            await connection.ExecuteAsync(sql);
+            return true;
+        }
+
+        private static string BuildCreateTableSql<T>(bool isMySql)
+        {
+            var tableName = GetTableName<T>();
+            var escapedTableName = EscapeTableName(tableName, isMySql);
+            var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Where(p => p.CanWrite && 
+                       !Attribute.IsDefined(p, typeof(NotMappedAttribute)) &&
+                       !Attribute.IsDefined(p, typeof(IgnoreAttribute)))
+                .ToList();
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"CREATE TABLE {escapedTableName} (");
+
+            var columns = new List<string>();
+            var primaryKeys = new List<string>();
+            var indexes = new List<string>();
+            var foreignKeys = new List<string>();
+            var autoIncrementColumn = "";
+            
+            // First pass - collect all primary keys to determine if we have single or composite keys
+            var allPrimaryKeys = properties
+                .Where(p => Attribute.IsDefined(p, typeof(KeyAttribute)) || Attribute.IsDefined(p, typeof(PrimaryKeyAttribute)))
+                .Select(p => p.Name)
+                .ToList();
+
+            foreach (var prop in properties)
+            {
+                var columnName = prop.Name;
+                var escapedColumnName = EscapeColumnName(columnName, isMySql);
+                var columnDef = new StringBuilder();
+                columnDef.Append($"    {escapedColumnName} ");
+
+                // Determine column type
+                var propType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
+                var isNullable = Nullable.GetUnderlyingType(prop.PropertyType) != null || !prop.PropertyType.IsValueType;
+
+                // Map CLR types to SQL types
+                string sqlType;
+                if (propType == typeof(int) || propType == typeof(Int32))
+                    sqlType = isMySql ? "INT" : "INTEGER";
+                else if (propType == typeof(long) || propType == typeof(Int64))
+                    sqlType = isMySql ? "BIGINT" : "INTEGER";
+                else if (propType == typeof(short) || propType == typeof(Int16))
+                    sqlType = isMySql ? "SMALLINT" : "INTEGER";
+                else if (propType == typeof(byte))
+                    sqlType = isMySql ? "TINYINT" : "INTEGER";
+                else if (propType == typeof(bool))
+                    sqlType = isMySql ? "BOOLEAN" : "INTEGER";
+                else if (propType == typeof(decimal))
+                    sqlType = "DECIMAL(19,4)";
+                else if (propType == typeof(double))
+                    sqlType = "DOUBLE";
+                else if (propType == typeof(float))
+                    sqlType = "FLOAT";
+                else if (propType == typeof(DateTime))
+                    sqlType = isMySql ? "DATETIME" : "TEXT";
+                else if (propType == typeof(Guid))
+                    sqlType = isMySql ? "CHAR(36)" : "TEXT";
+                else if (propType == typeof(string))
+                {
+                    var maxLengthAttr = prop.GetCustomAttribute<MaxLengthAttribute>();
+                    if (maxLengthAttr != null)
+                        sqlType = $"VARCHAR({maxLengthAttr.Length})";
+                    else
+                        sqlType = "TEXT";
+                }
+                else
+                    sqlType = "TEXT";
+
+                // Check for CustomField attribute
+                var customFieldAttr = prop.GetCustomAttribute<CustomFieldAttribute>();
+                if (customFieldAttr != null)
+                {
+                    sqlType = customFieldAttr.FieldType;
+                }
+
+                columnDef.Append(sqlType);
+
+                // Check for primary key
+                bool isPrimaryKey = Attribute.IsDefined(prop, typeof(KeyAttribute)) || Attribute.IsDefined(prop, typeof(PrimaryKeyAttribute));
+                bool isAutoIncrement = Attribute.IsDefined(prop, typeof(AutoIncrementAttribute)) || 
+                    prop.GetCustomAttribute<DatabaseGeneratedAttribute>()?.DatabaseGeneratedOption == DatabaseGeneratedOption.Identity;
+                
+                if (isPrimaryKey)
+                {
+                    primaryKeys.Add(escapedColumnName);
+                    
+                    // Handle auto-increment differently for MySQL vs SQLite
+                    if ((propType == typeof(int) || propType == typeof(long)) && isAutoIncrement)
+                    {
+                        if (isMySql)
+                        {
+                            columnDef.Append(" AUTO_INCREMENT");
+                        }
+                        else
+                        {
+                            // For SQLite, we need to handle this specially
+                            autoIncrementColumn = escapedColumnName;
+                            columnDef.Append(" PRIMARY KEY AUTOINCREMENT");
+                        }
+                    }
+                    else if (!isMySql && allPrimaryKeys.Count == 1)
+                    {
+                        // For SQLite single primary key without autoincrement
+                        columnDef.Append(" PRIMARY KEY");
+                    }
+                }
+
+                // Check for required/nullable (but not for primary keys in SQLite)
+                var requiredAttr = prop.GetCustomAttribute<RequiredAttribute>();
+                if (requiredAttr != null || (!isNullable && !isPrimaryKey))
+                {
+                    columnDef.Append(" NOT NULL");
+                }
+
+                columns.Add(columnDef.ToString());
+
+                // Check for foreign key
+                var foreignKeyAttr = prop.GetCustomAttribute<ReferenceAttribute>();
+                if (foreignKeyAttr != null)
+                {
+                    string foreignTableName;
+                    if (foreignKeyAttr.ForeignType != null)
+                    {
+                        foreignTableName = GetTableName(foreignKeyAttr.ForeignType);
+                    }
+                    else
+                    {
+                        foreignTableName = foreignKeyAttr.ForeignTableName ?? prop.Name.Replace("Id", "");
+                    }
+                    
+                    var escapedForeignTable = EscapeTableName(foreignTableName, isMySql);
+                    var fkName = $"FK_{tableName}_{columnName}";
+                    var fkDef = $"    CONSTRAINT {fkName} FOREIGN KEY ({escapedColumnName}) REFERENCES {escapedForeignTable}(Id)";
+                    
+                    if (!string.IsNullOrEmpty(foreignKeyAttr.OnDelete))
+                    {
+                        fkDef += $" ON DELETE {foreignKeyAttr.OnDelete}";
+                    }
+                    if (!string.IsNullOrEmpty(foreignKeyAttr.OnUpdate))
+                    {
+                        fkDef += $" ON UPDATE {foreignKeyAttr.OnUpdate}";
+                    }
+                    
+                    foreignKeys.Add(fkDef);
+                }
+            }
+
+            sb.AppendLine(string.Join(",\n", columns));
+
+            // Add primary key constraint (only for MySQL or multi-column primary keys in SQLite)
+            if (primaryKeys.Any())
+            {
+                if (isMySql)
+                {
+                    // MySQL always needs separate PRIMARY KEY constraint
+                    sb.AppendLine($",    PRIMARY KEY ({string.Join(", ", primaryKeys)})");
+                }
+                else if (primaryKeys.Count > 1)
+                {
+                    // SQLite composite primary key
+                    sb.AppendLine($",    PRIMARY KEY ({string.Join(", ", primaryKeys)})");
+                }
+                // For SQLite single primary key, it's already defined inline in the column definition
+            }
+
+            // Add foreign key constraints
+            if (foreignKeys.Any())
+            {
+                foreach (var fk in foreignKeys)
+                {
+                    sb.AppendLine($",    {fk}");
+                }
+            }
+
+            sb.Append(")");
+
+            if (isMySql)
+            {
+                sb.Append(" ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            }
+
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Query builder for fluent API (simplified version)
+        /// </summary>
+        public static SqlExpression<T> From<T>(this IDbConnection connection)
+        {
+            return new SqlExpression<T>(connection);
+        }
+
+        /// <summary>
+        /// Select with SqlExpression
+        /// </summary>
+        public static async Task<List<T>> SelectAsync<T>(this IDbConnection connection, SqlExpression<T> expression)
+        {
+            var sql = expression.ToSelectStatement();
+            var result = await connection.QueryAsync<T>(sql, expression.Parameters);
+            return result.ToList();
+        }
+
+        #endregion
+    }
+
+    /// <summary>
+    /// Simple SQL expression builder for compatibility
+    /// </summary>
+    public class SqlExpression<T>
+    {
+        private readonly IDbConnection _connection;
+        private readonly List<string> _whereConditions = new List<string>();
+        private readonly List<string> _orderByColumns = new List<string>();
+        private readonly DynamicParameters _parameters = new DynamicParameters();
+        private int? _limit;
+        private int? _offset;
+        private int _paramCounter = 0;
+
+        public DynamicParameters Parameters => _parameters;
+
+        public SqlExpression(IDbConnection connection)
+        {
+            _connection = connection;
+        }
+
+        public SqlExpression<T> Where(Expression<Func<T, bool>> predicate)
+        {
+            var (whereClause, parameters) = DapperOrmLiteExtensions.BuildWhereClause(predicate, _connection.GetType().Name.Contains("MySql"));
+            _whereConditions.Add(whereClause);
+            _parameters.AddDynamicParams(parameters);
+            return this;
+        }
+
+        public SqlExpression<T> Where(string sql, object parameters = null)
+        {
+            _whereConditions.Add(sql);
+            if (parameters != null)
+                _parameters.AddDynamicParams(parameters);
+            return this;
+        }
+
+        public SqlExpression<T> OrderBy(Expression<Func<T, object>> column)
+        {
+            var memberExpression = GetMemberExpression(column.Body);
+            if (memberExpression != null)
+            {
+                _orderByColumns.Add($"{memberExpression.Member.Name} ASC");
+            }
+            return this;
+        }
+
+        public SqlExpression<T> OrderByDescending(Expression<Func<T, object>> column)
+        {
+            var memberExpression = GetMemberExpression(column.Body);
+            if (memberExpression != null)
+            {
+                _orderByColumns.Add($"{memberExpression.Member.Name} DESC");
+            }
+            return this;
+        }
+
+        public SqlExpression<T> Limit(int rows, int? skip = null)
+        {
+            _limit = rows;
+            _offset = skip;
+            return this;
+        }
+
+        public string ToSelectStatement()
+        {
+            var tableName = DapperOrmLiteExtensions.GetTableName<T>();
+            var isMySql = _connection.GetType().Name.Contains("MySql");
+            var escapedTableName = DapperOrmLiteExtensions.EscapeTableName(tableName, isMySql);
+            
+            var sb = new StringBuilder();
+            sb.Append($"SELECT * FROM {escapedTableName}");
+
+            if (_whereConditions.Any())
+            {
+                sb.Append(" WHERE ");
+                sb.Append(string.Join(" AND ", _whereConditions));
+            }
+
+            if (_orderByColumns.Any())
+            {
+                sb.Append(" ORDER BY ");
+                sb.Append(string.Join(", ", _orderByColumns));
+            }
+
+            if (_limit.HasValue)
+            {
+                sb.Append($" LIMIT {_limit.Value}");
+                if (_offset.HasValue)
+                {
+                    sb.Append($" OFFSET {_offset.Value}");
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        private MemberExpression GetMemberExpression(Expression expression)
+        {
+            if (expression is MemberExpression memberExpression)
+                return memberExpression;
+            
+            if (expression is UnaryExpression unaryExpression && unaryExpression.NodeType == ExpressionType.Convert)
+                return GetMemberExpression(unaryExpression.Operand);
+            
+            return null;
+        }
     }
 }

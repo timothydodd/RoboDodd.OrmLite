@@ -11,12 +11,19 @@ namespace RoboDodd.OrmLite
         IDbConnection CreateDbConnection();
     }
 
+    public enum DatabaseProvider
+    {
+        SQLite,
+        MySql
+    }
+
     /// <summary>
     /// Implementation of connection factory for SQLite and MySQL
     /// </summary>
     public class DbConnectionFactory : IDbConnectionFactory
     {
         private readonly string _connectionString;
+        private readonly DatabaseProvider? _provider;
         private static bool _typeHandlersRegistered = false;
 
         public DbConnectionFactory(string connectionString)
@@ -25,8 +32,28 @@ namespace RoboDodd.OrmLite
             RegisterTypeHandlers();
         }
 
+        public DbConnectionFactory(string connectionString, DatabaseProvider provider)
+        {
+            _connectionString = connectionString;
+            _provider = provider;
+            RegisterTypeHandlers();
+        }
+
+        public IDbConnection CreateConnection() => CreateDbConnection();
+        
         public IDbConnection CreateDbConnection()
         {
+            // Use explicit provider if specified
+            if (_provider.HasValue)
+            {
+                return _provider.Value switch
+                {
+                    DatabaseProvider.SQLite => new Microsoft.Data.Sqlite.SqliteConnection(_connectionString),
+                    DatabaseProvider.MySql => new MySql.Data.MySqlClient.MySqlConnection(_connectionString),
+                    _ => throw new NotSupportedException($"Database provider {_provider} is not supported")
+                };
+            }
+            
             // Auto-detect database type based on connection string
             if (_connectionString.Contains("Data Source"))
             {
