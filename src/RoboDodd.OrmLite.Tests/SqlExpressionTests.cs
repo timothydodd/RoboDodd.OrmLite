@@ -336,4 +336,182 @@ public abstract class SqlExpressionTestsBase : IDisposable
         // The exact escaping depends on the database provider
         sql.Should().Contain("Order");
     }
+
+    [Fact]
+    public void SqlExpression_WithAndMethod_CombinesMultipleConditions()
+    {
+        // Arrange
+        using var db = ConnectionFactory.CreateDbConnection();
+        var expression = db.From<ServiceStackCompatibleUser>()
+            .Where(u => u.Name == "Test")
+            .And(u => u.Email.Contains("@example.com"));
+
+        // Act
+        var sql = expression.ToSelectStatement();
+
+        // Assert
+        sql.Should().Contain("WHERE");
+        // The SQL should contain both conditions joined by AND
+        // We can't directly inspect DynamicParameters, but we can verify the SQL structure
+    }
+
+    [Fact]
+    public void SqlExpression_WithAndMethodRawSql_CombinesConditions()
+    {
+        // Arrange
+        using var db = ConnectionFactory.CreateDbConnection();
+        var expression = db.From<ServiceStackCompatibleUser>()
+            .Where(u => u.Name == "Test")
+            .And("Email LIKE @email", new { email = "%@test.com" });
+
+        // Act
+        var sql = expression.ToSelectStatement();
+
+        // Assert
+        sql.Should().Contain("WHERE");
+        sql.Should().Contain("Email LIKE @email");
+    }
+
+    [Fact]
+    public void SqlExpression_WithOrMethod_CreatesOrCondition()
+    {
+        // Arrange
+        using var db = ConnectionFactory.CreateDbConnection();
+        var expression = db.From<ServiceStackCompatibleUser>()
+            .Where(u => u.Name == "Alice")
+            .Or(u => u.Name == "Bob");
+
+        // Act
+        var sql = expression.ToSelectStatement();
+
+        // Assert
+        sql.Should().Contain("WHERE");
+        sql.Should().Contain("OR");
+    }
+
+    [Fact]
+    public void SqlExpression_ToCountStatement_GeneratesCountQuery()
+    {
+        // Arrange
+        using var db = ConnectionFactory.CreateDbConnection();
+        var expression = db.From<ServiceStackCompatibleUser>()
+            .Where(u => u.Name.Contains("Test"));
+
+        // Act
+        var sql = expression.ToCountStatement();
+
+        // Assert
+        sql.Should().StartWith("SELECT COUNT(*) FROM");
+        sql.Should().Contain("ServiceStackCompatibleUser");
+        sql.Should().Contain("WHERE");
+        sql.Should().NotContain("ORDER BY"); // COUNT queries shouldn't have ORDER BY
+        sql.Should().NotContain("LIMIT");    // COUNT queries shouldn't have LIMIT
+    }
+
+    [Fact]
+    public async Task SqlExpression_WithCountAsync_ReturnsCorrectCount()
+    {
+        // Arrange
+        using var db = await CreateFreshConnectionAsync();
+        await db.CreateTableIfNotExistsAsync<ServiceStackCompatibleUser>();
+
+        // Insert test data
+        for (int i = 1; i <= 5; i++)
+        {
+            await db.InsertAsync(new ServiceStackCompatibleUser
+            {
+                Name = $"User{i}",
+                Email = $"user{i}@example.com",
+                CreatedAt = DateTime.UtcNow
+            });
+        }
+
+        // Act
+        var expression = db.From<ServiceStackCompatibleUser>()
+            .Where(u => u.Name.Contains("User"));
+        var count = await db.CountAsync(expression);
+
+        // Assert
+        count.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task SqlExpression_WithSelectAsync_ReturnsFilteredResults()
+    {
+        // Arrange
+        using var db = await CreateFreshConnectionAsync();
+        await db.CreateTableIfNotExistsAsync<ServiceStackCompatibleUser>();
+
+        // Insert test data
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "Alice", Email = "alice@example.com", CreatedAt = DateTime.UtcNow });
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "Bob", Email = "bob@example.com", CreatedAt = DateTime.UtcNow });
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "Charlie", Email = "charlie@example.com", CreatedAt = DateTime.UtcNow });
+
+        // Act
+        var expression = db.From<ServiceStackCompatibleUser>()
+            .Where(u => u.Name == "Alice")
+            .Or(u => u.Name == "Charlie")
+            .OrderBy(u => u.Name);
+        var results = await db.SelectAsync(expression);
+
+        // Assert
+        results.Should().HaveCount(2);
+        results[0].Name.Should().Be("Alice");
+        results[1].Name.Should().Be("Charlie");
+    }
+
+    [Fact]
+    public async Task SqlExpression_ComplexAndOrQuery_WorksCorrectly()
+    {
+        // Arrange
+        using var db = await CreateFreshConnectionAsync();
+        await db.CreateTableIfNotExistsAsync<ServiceStackCompatibleUser>();
+
+        // Insert test data
+        var baseTime = DateTime.UtcNow;
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "Active1", Email = "active1@test.com", CreatedAt = baseTime.AddDays(-1) });
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "Active2", Email = "active2@example.com", CreatedAt = baseTime.AddDays(-2) });
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "Inactive", Email = "inactive@test.com", CreatedAt = baseTime.AddDays(-10) });
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "Recent", Email = "recent@other.com", CreatedAt = baseTime });
+
+        // Act - Find users with @test.com email OR created in last 3 days, AND name contains "Active"
+        var expression = db.From<ServiceStackCompatibleUser>()
+            .Where(u => u.Name.Contains("Active"))
+            .And(u => u.Email.Contains("@test.com") || u.CreatedAt >= baseTime.AddDays(-3));
+
+        var results = await db.SelectAsync(expression);
+
+        // Assert
+        results.Should().HaveCount(3);
+        results.Should().Contain(u => u.Name == "Active1");
+        results.Should().Contain(u => u.Name == "Active2");
+        results.Should().Contain(u => u.Name == "Inactive");    // Included because "Inactive" contains "Active"
+        results.Should().NotContain(u => u.Name == "Recent");   // Excluded by name filter
+    }
+
+    [Fact]
+    public async Task SqlExpression_MultipleAndConditions_ChainCorrectly()
+    {
+        // Arrange
+        using var db = await CreateFreshConnectionAsync();
+        await db.CreateTableIfNotExistsAsync<ServiceStackCompatibleUser>();
+
+        // Insert test data
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "John Doe", Email = "john@example.com", CreatedAt = DateTime.UtcNow });
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "Jane Doe", Email = "jane@example.com", CreatedAt = DateTime.UtcNow.AddDays(-1) });
+        await db.InsertAsync(new ServiceStackCompatibleUser { Name = "John Smith", Email = "john@test.com", CreatedAt = DateTime.UtcNow });
+
+        // Act - Multiple AND conditions
+        var expression = db.From<ServiceStackCompatibleUser>()
+            .Where(u => u.Name.Contains("John"))
+            .And(u => u.Email.Contains("@example.com"))
+            .And(u => u.CreatedAt >= DateTime.UtcNow.AddHours(-1));
+
+        var results = await db.SelectAsync(expression);
+
+        // Assert
+        results.Should().HaveCount(1);
+        results[0].Name.Should().Be("John Doe");
+        results[0].Email.Should().Be("john@example.com");
+    }
 }

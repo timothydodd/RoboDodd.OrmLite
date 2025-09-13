@@ -37,6 +37,13 @@ namespace RoboDodd.OrmLite
             return result.ToList();
         }
 
+        public static async Task<List<T>> SelectAsync<T>(this IDbConnection connection, SqlExpression<T> expression)
+        {
+            var sql = expression.ToSelectStatement();
+            var result = await connection.QueryAsync<T>(sql, expression.Parameters);
+            return result.ToList();
+        }
+
         public static async Task<T?> SingleByIdAsync<T>(this IDbConnection connection, object id)
         {
             var tableName = GetTableName<T>();
@@ -79,6 +86,16 @@ namespace RoboDodd.OrmLite
             var (whereClause, parameters) = BuildWhereClause(predicate, isMySql);
             var sql = $"SELECT COUNT(*) FROM {escapedTableName} WHERE {whereClause}";
             return await connection.QuerySingleAsync<long>(sql, parameters);
+        }
+
+        public static async Task<long> CountAsync<T>(this IDbConnection connection, SqlExpression<T> expression)
+        {
+            var tableName = GetTableName<T>();
+            var isMySql = connection.GetType().Name.Contains("MySql");
+            var escapedTableName = EscapeTableName(tableName, isMySql);
+            
+            var sql = expression.ToCountStatement();
+            return await connection.QuerySingleAsync<long>(sql, expression.Parameters);
         }
 
         #endregion
@@ -186,6 +203,50 @@ namespace RoboDodd.OrmLite
             var sql = $"INSERT INTO {escapedTableName} ({columnNames}) VALUES ({parameterNames})";
 
             return await connection.ExecuteAsync(sql, entitiesList);
+        }
+
+        public static long Insert<T>(this IDbConnection connection, T entity, bool selectIdentity = false)
+        {
+            var tableName = GetTableName<T>();
+            var type = typeof(T);
+            var properties = GetInsertProperties<T>();
+            var isMySql = connection.GetType().Name.Contains("MySql");
+
+            var escapedTableName = EscapeTableName(tableName, isMySql);
+            var columnNames = string.Join(", ", properties.Select(p => EscapeColumnName(p.Name, isMySql)));
+            var parameterNames = string.Join(", ", properties.Select(p => "@" + p.Name));
+
+            var sql = $"INSERT INTO {escapedTableName} ({columnNames}) VALUES ({parameterNames})";
+
+            if (selectIdentity)
+            {
+                sql += isMySql ? "; SELECT LAST_INSERT_ID()" : "; SELECT last_insert_rowid()";
+                return connection.QuerySingle<long>(sql, entity);
+            }
+            else
+            {
+                connection.Execute(sql, entity);
+                return 0;
+            }
+        }
+
+        public static int InsertAll<T>(this IDbConnection connection, IEnumerable<T> entities)
+        {
+            var entitiesList = entities.ToList();
+            if (!entitiesList.Any())
+                return 0;
+
+            var tableName = GetTableName<T>();
+            var properties = GetInsertProperties<T>();
+            var isMySql = connection.GetType().Name.Contains("MySql");
+
+            var escapedTableName = EscapeTableName(tableName, isMySql);
+            var columnNames = string.Join(", ", properties.Select(p => EscapeColumnName(p.Name, isMySql)));
+            var parameterNames = string.Join(", ", properties.Select(p => "@" + p.Name));
+
+            var sql = $"INSERT INTO {escapedTableName} ({columnNames}) VALUES ({parameterNames})";
+
+            return connection.Execute(sql, entitiesList);
         }
 
         #endregion
@@ -508,6 +569,40 @@ namespace RoboDodd.OrmLite
             return await connection.QuerySingleOrDefaultAsync<T>(sql, parameters);
         }
 
+        /// <summary>
+        /// Execute a raw SQL command that doesn't return a result set (e.g., INSERT, UPDATE, DELETE)
+        /// Returns the number of rows affected
+        /// </summary>
+        public static async Task<int> ExecuteNonQueryAsync(this IDbConnection connection, string sql, object? parameters = null)
+        {
+            return await connection.ExecuteAsync(sql, parameters);
+        }
+
+        /// <summary>
+        /// Execute a raw SQL command that doesn't return a result set (e.g., INSERT, UPDATE, DELETE)
+        /// Returns the number of rows affected
+        /// </summary>
+        public static int ExecuteNonQuery(this IDbConnection connection, string sql, object? parameters = null)
+        {
+            return connection.Execute(sql, parameters);
+        }
+
+        /// <summary>
+        /// Execute raw SQL command
+        /// </summary>
+        public static async Task<int> ExecuteSqlAsync(this IDbConnection connection, string sql, object? parameters = null)
+        {
+            return await connection.ExecuteAsync(sql, parameters);
+        }
+
+        /// <summary>
+        /// Execute raw SQL command
+        /// </summary>
+        public static int ExecuteSql(this IDbConnection connection, string sql, object? parameters = null)
+        {
+            return connection.Execute(sql, parameters);
+        }
+
         #endregion
 
         #region Helper Methods
@@ -592,6 +687,14 @@ namespace RoboDodd.OrmLite
             // Simple expression parser for basic conditions
             // This is a simplified version - you might want to expand this for more complex expressions
             var visitor = new WhereClauseVisitor(isMySql);
+            visitor.Visit(predicate.Body);
+            return (visitor.WhereClause, visitor.Parameters);
+        }
+
+        public static (string whereClause, object parameters) BuildWhereClauseWithOffset<T>(Expression<Func<T, bool>> predicate, bool isMySql = false, int parameterOffset = 0)
+        {
+            // Simple expression parser for basic conditions with parameter offset to avoid collisions
+            var visitor = new WhereClauseVisitor(isMySql, parameterOffset);
             visitor.Visit(predicate.Body);
             return (visitor.WhereClause, visitor.Parameters);
         }
@@ -812,6 +915,19 @@ namespace RoboDodd.OrmLite
             {
                 return $"[{tableName}]";
             }
+        }
+
+        /// <summary>
+        /// Gets the quoted/escaped table name for the specified type
+        /// </summary>
+        /// <typeparam name="T">The type representing the table</typeparam>
+        /// <param name="connection">The database connection</param>
+        /// <returns>The quoted table name (e.g., `TableName` for MySQL or [TableName] for SQLite)</returns>
+        public static string GetQuotedTableName<T>(this IDbConnection connection)
+        {
+            var tableName = GetTableName<T>();
+            var isMySql = connection.GetType().Name.Contains("MySql");
+            return EscapeTableName(tableName, isMySql);
         }
 
         private static string EscapeColumnName(string columnName, bool isMySql)
@@ -1109,15 +1225,6 @@ namespace RoboDodd.OrmLite
             return new SqlExpression<T>(connection);
         }
 
-        /// <summary>
-        /// Select with SqlExpression
-        /// </summary>
-        public static async Task<List<T>> SelectAsync<T>(this IDbConnection connection, SqlExpression<T> expression)
-        {
-            var sql = expression.ToSelectStatement();
-            var result = await connection.QueryAsync<T>(sql, expression.Parameters);
-            return result.ToList();
-        }
 
         #endregion
     }
@@ -1155,6 +1262,43 @@ namespace RoboDodd.OrmLite
             _whereConditions.Add(sql);
             if (parameters != null)
                 _parameters.AddDynamicParams(parameters);
+            return this;
+        }
+
+        public SqlExpression<T> And(Expression<Func<T, bool>> predicate)
+        {
+            // Use existing parameter count to avoid collisions
+            var parameterOffset = _parameters.ParameterNames.Count();
+            var (whereClause, parameters) = DapperOrmLiteExtensions.BuildWhereClauseWithOffset(predicate, _connection.GetType().Name.Contains("MySql"), parameterOffset);
+            _whereConditions.Add(whereClause);
+            _parameters.AddDynamicParams(parameters);
+            return this;
+        }
+
+        public SqlExpression<T> And(string sql, object parameters = null)
+        {
+            _whereConditions.Add(sql);
+            if (parameters != null)
+                _parameters.AddDynamicParams(parameters);
+            return this;
+        }
+
+        public SqlExpression<T> Or(Expression<Func<T, bool>> predicate)
+        {
+            // Use existing parameter count to avoid collisions
+            var parameterOffset = _parameters.ParameterNames.Count();
+            var (whereClause, parameters) = DapperOrmLiteExtensions.BuildWhereClauseWithOffset(predicate, _connection.GetType().Name.Contains("MySql"), parameterOffset);
+            if (_whereConditions.Any())
+            {
+                // Wrap the last condition and this one in parentheses for proper OR logic
+                var lastCondition = _whereConditions[_whereConditions.Count - 1];
+                _whereConditions[_whereConditions.Count - 1] = $"({lastCondition} OR {whereClause})";
+            }
+            else
+            {
+                _whereConditions.Add(whereClause);
+            }
+            _parameters.AddDynamicParams(parameters);
             return this;
         }
 
@@ -1213,6 +1357,24 @@ namespace RoboDodd.OrmLite
                 {
                     sb.Append($" OFFSET {_offset.Value}");
                 }
+            }
+
+            return sb.ToString();
+        }
+
+        public string ToCountStatement()
+        {
+            var tableName = DapperOrmLiteExtensions.GetTableName<T>();
+            var isMySql = _connection.GetType().Name.Contains("MySql");
+            var escapedTableName = DapperOrmLiteExtensions.EscapeTableName(tableName, isMySql);
+            
+            var sb = new StringBuilder();
+            sb.Append($"SELECT COUNT(*) FROM {escapedTableName}");
+
+            if (_whereConditions.Any())
+            {
+                sb.Append(" WHERE ");
+                sb.Append(string.Join(" AND ", _whereConditions));
             }
 
             return sb.ToString();

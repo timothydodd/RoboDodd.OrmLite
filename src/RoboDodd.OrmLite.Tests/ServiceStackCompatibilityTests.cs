@@ -306,4 +306,34 @@ public abstract class ServiceStackCompatibilityTestsBase : IDisposable
         retrieved!.IsActive.Should().BeTrue(); // Explicitly set value
         retrieved.CreatedAt.Should().BeCloseTo(DateTime.UtcNow, TimeSpan.FromMinutes(1)); // Should be close to now (UTC)
     }
+
+    [Fact]
+    public void GetQuotedTableName_ReturnsCorrectlyEscapedTableName()
+    {
+        // Arrange
+        using var connection = ConnectionFactory.CreateDbConnection();
+
+        // Act
+        var quotedTableName = connection.GetQuotedTableName<ServiceStackCompatibleUser>();
+
+        // Assert
+        quotedTableName.Should().NotBeNull();
+        quotedTableName.Should().NotBeEmpty();
+
+        // Verify correct quoting based on database provider
+        if (IsMySQL)
+        {
+            // MySQL uses backticks
+            quotedTableName.Should().StartWith("`");
+            quotedTableName.Should().EndWith("`");
+            quotedTableName.Should().Be("`ServiceStackCompatibleUser`");
+        }
+        else
+        {
+            // SQLite uses square brackets
+            quotedTableName.Should().StartWith("[");
+            quotedTableName.Should().EndWith("]");
+            quotedTableName.Should().Be("[ServiceStackCompatibleUser]");
+        }
+    }
 }

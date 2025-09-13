@@ -13,9 +13,10 @@ namespace RoboDodd.OrmLite
         private readonly bool _isMySql;
         private int _parameterIndex = 0;
 
-        public WhereClauseVisitor(bool isMySql = false)
+        public WhereClauseVisitor(bool isMySql = false, int parameterOffset = 0)
         {
             _isMySql = isMySql;
+            _parameterIndex = parameterOffset;
         }
 
         public string WhereClause => _sb.ToString();
@@ -67,6 +68,7 @@ namespace RoboDodd.OrmLite
             // For logical operators
             if (IsLogicalOperator(node.NodeType))
             {
+                _sb.Append("(");
                 Visit(node.Left);
                 
                 switch (node.NodeType)
@@ -80,6 +82,7 @@ namespace RoboDodd.OrmLite
                 }
                 
                 Visit(node.Right);
+                _sb.Append(")");
                 return node;
             }
             
@@ -298,9 +301,42 @@ namespace RoboDodd.OrmLite
                     throw new NotSupportedException($"EndsWith method with {node.Arguments.Count} arguments is not supported");
                 }
             }
+            else if (node.Method.DeclaringType == typeof(DateTime))
+            {
+                // Handle DateTime methods by evaluating them client-side
+                // Methods like AddDays, AddHours, AddMinutes, etc.
+                try
+                {
+                    var lambda = Expression.Lambda(node);
+                    var compiled = lambda.Compile();
+                    var value = compiled.DynamicInvoke();
+                    
+                    var paramName = $"p{_parameterIndex++}";
+                    _parameters[paramName] = value;
+                    _sb.Append($"@{paramName}");
+                }
+                catch (Exception)
+                {
+                    throw new NotSupportedException($"DateTime method {node.Method.Name} could not be evaluated client-side");
+                }
+            }
             else
             {
-                throw new NotSupportedException($"Method {node.Method.Name} is not supported");
+                // For other method calls that should be evaluated client-side (like arithmetic operations)
+                try
+                {
+                    var lambda = Expression.Lambda(node);
+                    var compiled = lambda.Compile();
+                    var value = compiled.DynamicInvoke();
+                    
+                    var paramName = $"p{_parameterIndex++}";
+                    _parameters[paramName] = value;
+                    _sb.Append($"@{paramName}");
+                }
+                catch (Exception)
+                {
+                    throw new NotSupportedException($"Method {node.Method.Name} is not supported");
+                }
             }
             return node;
         }
