@@ -622,6 +622,8 @@ namespace RoboDodd.OrmLite
         {
             var type = typeof(T);
             var keyProperty = type.GetProperties()
+                .FirstOrDefault(p => p.GetCustomAttribute<PrimaryKeyAttribute>() != null)
+                ?? type.GetProperties()
                 .FirstOrDefault(p => p.GetCustomAttribute<KeyAttribute>() != null)
                 ?? type.GetProperty("Id");
             return keyProperty?.Name ?? "Id";
