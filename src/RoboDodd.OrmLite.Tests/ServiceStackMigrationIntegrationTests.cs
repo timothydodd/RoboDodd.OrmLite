@@ -89,7 +89,7 @@ public class ServiceStackMigrationIntegrationTests : IDisposable
                 .GetMethod(nameof(DapperOrmLiteExtensions.CreateTableIfNotExistsAsync))!
                 .MakeGenericMethod(tableType);
             
-            var task = (Task<bool>)method.Invoke(null, new object[] { db })!;
+            var task = (Task<bool>)method.Invoke(null, new object[] { db, false })!;
             var created = await task;
             Assert.True(created);
         }

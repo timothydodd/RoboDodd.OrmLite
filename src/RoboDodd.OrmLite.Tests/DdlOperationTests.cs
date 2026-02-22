@@ -426,6 +426,105 @@ public abstract class DdlOperationTestsBase : IDisposable
     }
 
     [Fact]
+    public async Task CreateTableIfNotExists_WithMigrateSchema_AddsNewColumns()
+    {
+        // Arrange - Use fresh database so no prior table exists
+        using var connection = await CreateFreshConnectionAsync();
+
+        // Create table with V1 model (Id, Name only)
+        var created = connection.CreateTableIfNotExists<MigrateTestV1>();
+        created.Should().BeTrue();
+
+        // Insert a row with V1 schema
+        connection.Execute("INSERT INTO migrate_test (Name) VALUES ('TestRow')");
+
+        // Act - Call CreateTableIfNotExists with V2 model and migrateSchema=true
+        var createdAgain = connection.CreateTableIfNotExists<MigrateTestV2>(migrateSchema: true);
+        createdAgain.Should().BeFalse(); // Table already existed
+
+        // Assert - The new columns should exist and be queryable
+        var results = await connection.SelectAsync<MigrateTestV2>();
+        results.Should().HaveCount(1);
+        results[0].Name.Should().Be("TestRow");
+        results[0].Description.Should().BeNull();
+        results[0].DownloadCount.Should().Be(0); // Default for NOT NULL int
+        results[0].LastAccessed.Should().BeNull();
+
+        // Verify we can insert with the new columns
+        await connection.InsertAsync(new MigrateTestV2
+        {
+            Name = "NewRow",
+            Description = "A description",
+            DownloadCount = 5,
+            LastAccessed = DateTime.UtcNow
+        });
+
+        var allResults = await connection.SelectAsync<MigrateTestV2>();
+        allResults.Should().HaveCount(2);
+        allResults[1].Description.Should().Be("A description");
+        allResults[1].DownloadCount.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task CreateTableIfNotExistsAsync_WithMigrateSchema_AddsNewColumns()
+    {
+        // Arrange
+        using var connection = await CreateFreshConnectionAsync();
+
+        await connection.CreateTableIfNotExistsAsync<MigrateTestV1>();
+        connection.Execute("INSERT INTO migrate_test (Name) VALUES ('AsyncTest')");
+
+        // Act
+        var createdAgain = await connection.CreateTableIfNotExistsAsync<MigrateTestV2>(migrateSchema: true);
+        createdAgain.Should().BeFalse();
+
+        // Assert
+        var results = await connection.SelectAsync<MigrateTestV2>();
+        results.Should().HaveCount(1);
+        results[0].Name.Should().Be("AsyncTest");
+        results[0].Description.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CreateTableIfNotExists_WithMigrateSchemaFalse_DoesNotAddColumns()
+    {
+        // Arrange
+        using var connection = await CreateFreshConnectionAsync();
+
+        connection.CreateTableIfNotExists<MigrateTestV1>();
+        connection.Execute("INSERT INTO migrate_test (Name) VALUES ('NoMigrate')");
+
+        // Act - migrateSchema defaults to false
+        connection.CreateTableIfNotExists<MigrateTestV2>();
+
+        // Assert - Querying V2 columns should fail because they don't exist
+        var action = async () => await connection.SelectAsync<MigrateTestV2>();
+        // Depending on the database, this may succeed with nulls or throw
+        // For SQLite, Dapper will just map what it can, so let's verify the columns
+        // weren't actually added by checking table_info
+        if (!IsMySQL)
+        {
+            var columns = connection.Query<dynamic>("PRAGMA table_info('migrate_test')")
+                .Select(c => (string)c.name)
+                .ToList();
+            columns.Should().Contain("Id");
+            columns.Should().Contain("Name");
+            columns.Should().NotContain("Description");
+            columns.Should().NotContain("DownloadCount");
+        }
+        else
+        {
+            var columns = connection.Query<string>(
+                "SELECT COLUMN_NAME FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'migrate_test'")
+                .ToList();
+            columns.Should().Contain("Id");
+            columns.Should().Contain("Name");
+            columns.Should().NotContain("Description");
+            columns.Should().NotContain("DownloadCount");
+        }
+    }
+
+    [Fact]
     public void GetTableName_ReturnsCorrectTableNames()
     {
         // Act & Assert

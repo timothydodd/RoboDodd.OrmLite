@@ -166,6 +166,35 @@ public class BlogPost
     public bool IsPublished { get; set; } = false;
 }
 
+// Test models for schema migration
+[Table("migrate_test")]
+public class MigrateTestV1
+{
+    [PrimaryKey]
+    [AutoIncrement]
+    public int Id { get; set; }
+
+    [Required]
+    public string Name { get; set; } = null!;
+}
+
+[Table("migrate_test")]
+public class MigrateTestV2
+{
+    [PrimaryKey]
+    [AutoIncrement]
+    public int Id { get; set; }
+
+    [Required]
+    public string Name { get; set; } = null!;
+
+    public string? Description { get; set; }
+
+    public int DownloadCount { get; set; }
+
+    public DateTime? LastAccessed { get; set; }
+}
+
 // Test model with composite indexes using our attributes
 [CompositeIndex(nameof(Status), nameof(Priority), nameof(CreatedDate))]
 [CompositeIndex(nameof(AssignedUserId), nameof(Status), Unique = true)]

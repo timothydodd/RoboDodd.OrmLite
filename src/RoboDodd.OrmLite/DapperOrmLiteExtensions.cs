@@ -977,12 +977,15 @@ namespace RoboDodd.OrmLite
         /// <summary>
         /// Creates a table if it doesn't exist
         /// </summary>
-        public static bool CreateTableIfNotExists<T>(this IDbConnection connection)
+        /// <param name="connection">The database connection</param>
+        /// <param name="migrateSchema">When true, adds any missing columns to an existing table</param>
+        /// <returns>True if the table was created, false if it already existed</returns>
+        public static bool CreateTableIfNotExists<T>(this IDbConnection connection, bool migrateSchema = false)
         {
             var tableName = GetTableName<T>();
             var isMySql = connection.GetType().Name.Contains("MySql");
             var escapedTableName = EscapeTableName(tableName, isMySql);
-            
+
             // Check if table exists
             string checkTableSql;
             if (isMySql)
@@ -993,11 +996,15 @@ namespace RoboDodd.OrmLite
             {
                 checkTableSql = $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{tableName}'";
             }
-            
+
             var exists = connection.QuerySingle<int>(checkTableSql) > 0;
             if (exists)
+            {
+                if (migrateSchema)
+                    MigrateTable<T>(connection, tableName, isMySql);
                 return false;
-            
+            }
+
             // Create table
             var sql = BuildCreateTableSql<T>(isMySql);
             connection.Execute(sql);
@@ -1007,12 +1014,15 @@ namespace RoboDodd.OrmLite
         /// <summary>
         /// Creates a table if it doesn't exist (async version)
         /// </summary>
-        public static async Task<bool> CreateTableIfNotExistsAsync<T>(this IDbConnection connection)
+        /// <param name="connection">The database connection</param>
+        /// <param name="migrateSchema">When true, adds any missing columns to an existing table</param>
+        /// <returns>True if the table was created, false if it already existed</returns>
+        public static async Task<bool> CreateTableIfNotExistsAsync<T>(this IDbConnection connection, bool migrateSchema = false)
         {
             var tableName = GetTableName<T>();
             var isMySql = connection.GetType().Name.Contains("MySql");
             var escapedTableName = EscapeTableName(tableName, isMySql);
-            
+
             // Check if table exists
             string checkTableSql;
             if (isMySql)
@@ -1023,15 +1033,201 @@ namespace RoboDodd.OrmLite
             {
                 checkTableSql = $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{tableName}'";
             }
-            
+
             var exists = await connection.QuerySingleAsync<int>(checkTableSql) > 0;
             if (exists)
+            {
+                if (migrateSchema)
+                    await MigrateTableAsync<T>(connection, tableName, isMySql);
                 return false;
-            
+            }
+
             // Create table
             var sql = BuildCreateTableSql<T>(isMySql);
             await connection.ExecuteAsync(sql);
             return true;
+        }
+
+        /// <summary>
+        /// Compares the model's properties against existing table columns and adds any missing columns
+        /// </summary>
+        private static void MigrateTable<T>(IDbConnection connection, string tableName, bool isMySql)
+        {
+            var existingColumns = GetExistingColumns(connection, tableName, isMySql);
+            var alterStatements = BuildAlterTableStatements<T>(tableName, isMySql, existingColumns);
+            foreach (var sql in alterStatements)
+            {
+                connection.Execute(sql);
+            }
+        }
+
+        /// <summary>
+        /// Compares the model's properties against existing table columns and adds any missing columns (async)
+        /// </summary>
+        private static async Task MigrateTableAsync<T>(IDbConnection connection, string tableName, bool isMySql)
+        {
+            var existingColumns = await GetExistingColumnsAsync(connection, tableName, isMySql);
+            var alterStatements = BuildAlterTableStatements<T>(tableName, isMySql, existingColumns);
+            foreach (var sql in alterStatements)
+            {
+                await connection.ExecuteAsync(sql);
+            }
+        }
+
+        private static HashSet<string> GetExistingColumns(IDbConnection connection, string tableName, bool isMySql)
+        {
+            string sql;
+            if (isMySql)
+            {
+                sql = $"SELECT COLUMN_NAME FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = '{tableName}'";
+            }
+            else
+            {
+                sql = $"PRAGMA table_info('{tableName}')";
+            }
+
+            if (isMySql)
+            {
+                var columns = connection.Query<string>(sql);
+                return new HashSet<string>(columns, StringComparer.OrdinalIgnoreCase);
+            }
+            else
+            {
+                var columns = connection.Query<dynamic>(sql);
+                return new HashSet<string>(columns.Select(c => (string)c.name), StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        private static async Task<HashSet<string>> GetExistingColumnsAsync(IDbConnection connection, string tableName, bool isMySql)
+        {
+            string sql;
+            if (isMySql)
+            {
+                sql = $"SELECT COLUMN_NAME FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = '{tableName}'";
+            }
+            else
+            {
+                sql = $"PRAGMA table_info('{tableName}')";
+            }
+
+            if (isMySql)
+            {
+                var columns = await connection.QueryAsync<string>(sql);
+                return new HashSet<string>(columns, StringComparer.OrdinalIgnoreCase);
+            }
+            else
+            {
+                var columns = await connection.QueryAsync<dynamic>(sql);
+                return new HashSet<string>(columns.Select(c => (string)c.name), StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        private static List<string> BuildAlterTableStatements<T>(string tableName, bool isMySql, HashSet<string> existingColumns)
+        {
+            var escapedTableName = EscapeTableName(tableName, isMySql);
+            var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Where(p => p.CanWrite &&
+                       !Attribute.IsDefined(p, typeof(NotMappedAttribute)) &&
+                       !Attribute.IsDefined(p, typeof(IgnoreAttribute)))
+                .ToList();
+
+            var statements = new List<string>();
+
+            foreach (var prop in properties)
+            {
+                var columnName = prop.Name;
+                if (existingColumns.Contains(columnName))
+                    continue;
+
+                var escapedColumnName = EscapeColumnName(columnName, isMySql);
+                var columnDef = BuildColumnDefinition(prop, isMySql);
+
+                if (isMySql)
+                    statements.Add($"ALTER TABLE {escapedTableName} ADD COLUMN {escapedColumnName} {columnDef}");
+                else
+                    statements.Add($"ALTER TABLE {escapedTableName} ADD COLUMN {escapedColumnName} {columnDef}");
+            }
+
+            return statements;
+        }
+
+        /// <summary>
+        /// Builds the column type and constraints for a single property (used by migration)
+        /// </summary>
+        private static string BuildColumnDefinition(PropertyInfo prop, bool isMySql)
+        {
+            var propType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
+            var isNullable = Nullable.GetUnderlyingType(prop.PropertyType) != null || !prop.PropertyType.IsValueType;
+
+            string sqlType;
+            if (propType == typeof(int) || propType == typeof(Int32))
+                sqlType = isMySql ? "INT" : "INTEGER";
+            else if (propType == typeof(long) || propType == typeof(Int64))
+                sqlType = isMySql ? "BIGINT" : "INTEGER";
+            else if (propType == typeof(short) || propType == typeof(Int16))
+                sqlType = isMySql ? "SMALLINT" : "INTEGER";
+            else if (propType == typeof(byte))
+                sqlType = isMySql ? "TINYINT" : "INTEGER";
+            else if (propType == typeof(bool))
+                sqlType = isMySql ? "BOOLEAN" : "INTEGER";
+            else if (propType == typeof(decimal))
+                sqlType = "DECIMAL(19,4)";
+            else if (propType == typeof(double))
+                sqlType = "DOUBLE";
+            else if (propType == typeof(float))
+                sqlType = "FLOAT";
+            else if (propType == typeof(DateTime))
+                sqlType = isMySql ? "DATETIME" : "TEXT";
+            else if (propType == typeof(Guid))
+                sqlType = isMySql ? "CHAR(36)" : "TEXT";
+            else if (propType == typeof(string))
+            {
+                var maxLengthAttr = prop.GetCustomAttribute<MaxLengthAttribute>();
+                if (maxLengthAttr != null)
+                    sqlType = $"VARCHAR({maxLengthAttr.Length})";
+                else
+                    sqlType = "TEXT";
+            }
+            else
+                sqlType = "TEXT";
+
+            var customFieldAttr = prop.GetCustomAttribute<CustomFieldAttribute>();
+            if (customFieldAttr != null)
+                sqlType = customFieldAttr.FieldType;
+
+            var sb = new StringBuilder(sqlType);
+
+            // For NOT NULL columns, we need a DEFAULT value since existing rows won't have data
+            var requiredAttr = prop.GetCustomAttribute<RequiredAttribute>();
+            if (requiredAttr != null || (!isNullable && !Attribute.IsDefined(prop, typeof(KeyAttribute)) && !Attribute.IsDefined(prop, typeof(PrimaryKeyAttribute))))
+            {
+                sb.Append(" NOT NULL");
+
+                // Check for explicit default
+                var defaultAttr = prop.GetCustomAttribute<DefaultAttribute>();
+                if (defaultAttr != null)
+                {
+                    sb.Append($" DEFAULT {defaultAttr.Value}");
+                }
+                else
+                {
+                    // Provide a sensible default for NOT NULL columns being added to existing tables
+                    if (propType == typeof(int) || propType == typeof(long) || propType == typeof(short) || propType == typeof(byte))
+                        sb.Append(" DEFAULT 0");
+                    else if (propType == typeof(bool))
+                        sb.Append(isMySql ? " DEFAULT FALSE" : " DEFAULT 0");
+                    else if (propType == typeof(decimal) || propType == typeof(double) || propType == typeof(float))
+                        sb.Append(" DEFAULT 0");
+                    else if (propType == typeof(string))
+                        sb.Append(" DEFAULT ''");
+                    else if (propType == typeof(DateTime))
+                        sb.Append(isMySql ? " DEFAULT CURRENT_TIMESTAMP" : " DEFAULT ''");
+                    else if (propType == typeof(Guid))
+                        sb.Append(" DEFAULT ''");
+                }
+            }
+
+            return sb.ToString();
         }
 
         private static string BuildCreateTableSql<T>(bool isMySql)
