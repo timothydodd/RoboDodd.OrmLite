@@ -525,6 +525,42 @@ public abstract class DdlOperationTestsBase : IDisposable
     }
 
     [Fact]
+    public async Task CreateTableIfNotExists_WithMigrateSchema_HandlesDefaultAttributeWithExpression()
+    {
+        // Arrange - Use fresh database so no prior table exists
+        using var connection = await CreateFreshConnectionAsync();
+
+        // Create table with V1 model (Id, Name only)
+        var created = connection.CreateTableIfNotExists<MigrateTestV1>();
+        created.Should().BeTrue();
+
+        // Insert a row with V1 schema
+        connection.Execute("INSERT INTO migrate_test (Name) VALUES ('DefaultAttrTest')");
+
+        // Act - Migrate to V3 which has [Default(typeof(int), "0")] and [Default(typeof(DateTime), "CURRENT_TIMESTAMP")]
+        var createdAgain = connection.CreateTableIfNotExists<MigrateTestV3>(migrateSchema: true);
+        createdAgain.Should().BeFalse();
+
+        // Assert - Should not throw "incomplete input" and columns should be usable
+        var results = await connection.SelectAsync<MigrateTestV3>();
+        results.Should().HaveCount(1);
+        results[0].Name.Should().Be("DefaultAttrTest");
+        results[0].DownloadCount.Should().Be(0);
+
+        // Verify we can insert with the new columns using their defaults
+        await connection.InsertAsync(new MigrateTestV3
+        {
+            Name = "NewRow",
+            DownloadCount = 42,
+            CreatedDate = DateTime.UtcNow
+        });
+
+        var allResults = await connection.SelectAsync<MigrateTestV3>();
+        allResults.Should().HaveCount(2);
+        allResults[1].DownloadCount.Should().Be(42);
+    }
+
+    [Fact]
     public void GetTableName_ReturnsCorrectTableNames()
     {
         // Act & Assert

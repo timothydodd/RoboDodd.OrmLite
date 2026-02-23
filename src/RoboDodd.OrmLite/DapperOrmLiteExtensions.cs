@@ -1207,7 +1207,19 @@ namespace RoboDodd.OrmLite
                 var defaultAttr = prop.GetCustomAttribute<DefaultAttribute>();
                 if (defaultAttr != null)
                 {
-                    sb.Append($" DEFAULT {defaultAttr.Value}");
+                    if (defaultAttr.Expression != null)
+                    {
+                        // SQLite ALTER TABLE ADD COLUMN does not support non-constant defaults
+                        // like CURRENT_TIMESTAMP, so use a constant fallback instead
+                        if (!isMySql && defaultAttr.Expression == "CURRENT_TIMESTAMP")
+                            sb.Append(" DEFAULT ''");
+                        else
+                            sb.Append($" DEFAULT {defaultAttr.Expression}");
+                    }
+                    else if (defaultAttr.Value != null)
+                    {
+                        sb.Append($" DEFAULT {defaultAttr.Value}");
+                    }
                 }
                 else
                 {
