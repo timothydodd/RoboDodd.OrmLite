@@ -40,11 +40,23 @@ public abstract class ExtendedCrudOperationTestsBase : IDisposable
         ConnectionFactory = connectionFactory;
         _connection = ConnectionFactory.CreateDbConnection();
         _connection.Open();
-        
+
+        // Ensure tables exist before tests run
+        EnsureTables();
+
         // Clean up any existing test data
         CleanupTestData();
     }
-    
+
+    private void EnsureTables()
+    {
+        _connection.CreateTableIfNotExists<TestUser>();
+        _connection.CreateTableIfNotExists<TestPost>();
+        _connection.CreateTableIfNotExists<TestCategory>();
+        _connection.CreateTableIfNotExists<TestOrder>();
+        _connection.CreateTableIfNotExists<ServiceStackCompatibleUser>();
+    }
+
     private void CleanupTestData()
     {
         try

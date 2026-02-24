@@ -220,7 +220,7 @@ public abstract class SqlExpressionTestsBase : IDisposable
     public async Task SqlExpression_WithSelectAsync_ExecutesQuery()
     {
         // Arrange
-        using var db = ConnectionFactory.CreateDbConnection();
+        using var db = await CreateFreshConnectionAsync();
         await db.CreateTableIfNotExistsAsync<ServiceStackCompatibleUser>();
 
         // Insert test data

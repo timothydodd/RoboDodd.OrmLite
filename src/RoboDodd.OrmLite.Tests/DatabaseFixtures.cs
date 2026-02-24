@@ -16,7 +16,7 @@ public class MySqlFixture : IAsyncLifetime
     
     public IDbConnectionFactory ConnectionFactory { get; private set; } = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _container = new MySqlBuilder()
             .WithDatabase("testdb")
@@ -34,7 +34,7 @@ public class MySqlFixture : IAsyncLifetime
         await CreateTestTablesAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_container != null)
         {

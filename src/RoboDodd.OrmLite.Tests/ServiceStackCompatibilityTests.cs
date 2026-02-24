@@ -108,7 +108,8 @@ public abstract class ServiceStackCompatibilityTestsBase : IDisposable
     public async Task IgnoreAttribute_ExcludesFieldFromInsert()
     {
         // Arrange
-        using var connection = ConnectionFactory.CreateDbConnection();
+        using var connection = await CreateFreshConnectionAsync();
+        await connection.CreateTableIfNotExistsAsync<ServiceStackCompatibleUser>();
         await connection.CreateTableIfNotExistsAsync<TaskItem>();
 
         var task = new TaskItem
@@ -139,7 +140,7 @@ public abstract class ServiceStackCompatibilityTestsBase : IDisposable
     public async Task Index_CreatesIndexOnColumn()
     {
         // Arrange
-        using var connection = ConnectionFactory.CreateDbConnection();
+        using var connection = await CreateFreshConnectionAsync();
 
         await connection.CreateTableIfNotExistsAsync<ServiceStackCompatibleUser>();
         await connection.CreateTableIfNotExistsAsync<TestCategory>();
@@ -256,7 +257,7 @@ public abstract class ServiceStackCompatibilityTestsBase : IDisposable
     public async Task CustomFieldAttribute_CreatesCorrectColumnType()
     {
         // Arrange
-        using var connection = ConnectionFactory.CreateDbConnection();
+        using var connection = await CreateFreshConnectionAsync();
 
         // Act
         var created = await connection.CreateTableIfNotExistsAsync<TestUser>();
