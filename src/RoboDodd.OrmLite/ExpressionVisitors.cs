@@ -28,8 +28,25 @@ namespace RoboDodd.OrmLite
             // that should be evaluated on the .NET side
             if (IsComparisonOperator(node.NodeType))
             {
+                // Handle null comparisons: x == null → x IS NULL, x != null → x IS NOT NULL
+                if (node.NodeType == ExpressionType.Equal || node.NodeType == ExpressionType.NotEqual)
+                {
+                    if (IsNullConstant(node.Right))
+                    {
+                        Visit(node.Left);
+                        _sb.Append(node.NodeType == ExpressionType.Equal ? " IS NULL" : " IS NOT NULL");
+                        return node;
+                    }
+                    if (IsNullConstant(node.Left))
+                    {
+                        Visit(node.Right);
+                        _sb.Append(node.NodeType == ExpressionType.Equal ? " IS NULL" : " IS NOT NULL");
+                        return node;
+                    }
+                }
+
                 Visit(node.Left);
-                
+
                 switch (node.NodeType)
                 {
                     case ExpressionType.Equal:
@@ -51,7 +68,7 @@ namespace RoboDodd.OrmLite
                         _sb.Append(" <= ");
                         break;
                 }
-                
+
                 // If right side is arithmetic, evaluate it as a constant
                 if (IsArithmeticExpression(node.Right))
                 {
@@ -61,7 +78,7 @@ namespace RoboDodd.OrmLite
                 {
                     Visit(node.Right);
                 }
-                
+
                 return node;
             }
             
@@ -105,6 +122,16 @@ namespace RoboDodd.OrmLite
             return nodeType == ExpressionType.AndAlso || nodeType == ExpressionType.OrElse;
         }
         
+        private static bool IsNullConstant(Expression expression)
+        {
+            // Unwrap Convert nodes (e.g., (object)null or (int?)null)
+            while (expression is UnaryExpression unary && unary.NodeType == ExpressionType.Convert)
+            {
+                expression = unary.Operand;
+            }
+            return expression is ConstantExpression constant && constant.Value == null;
+        }
+
         private bool IsArithmeticExpression(Expression expression)
         {
             if (expression is BinaryExpression binary)
