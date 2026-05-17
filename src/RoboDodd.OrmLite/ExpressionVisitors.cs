@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Linq.Expressions;
 using System.Text;
 
@@ -145,6 +146,49 @@ namespace RoboDodd.OrmLite
             return false;
         }
         
+        /// <summary>
+        /// Emits `item IN (@p0, @p1, ...)`. The `collection` expression is evaluated to its
+        /// runtime IEnumerable and each element is bound as an individual parameter — Dapper-style
+        /// IN expansion built into the visitor so SQLite doesn't see a single list-valued param
+        /// (which it interprets as a row-value and rejects with "row value misused").
+        /// </summary>
+        private void EmitInList(Expression item, Expression collection)
+        {
+            object? value;
+            try
+            {
+                value = Expression.Lambda(collection).Compile().DynamicInvoke();
+            }
+            catch (Exception ex)
+            {
+                throw new NotSupportedException("Could not evaluate the collection expression for Contains: " + ex.Message, ex);
+            }
+
+            if (value is not IEnumerable enumerable || value is string)
+                throw new NotSupportedException("Contains target must be an IEnumerable collection.");
+
+            Visit(item);
+
+            var paramNames = new List<string>();
+            foreach (var v in enumerable)
+            {
+                var p = $"p{_parameterIndex++}";
+                _parameters[p] = v!;
+                paramNames.Add("@" + p);
+            }
+            if (paramNames.Count == 0)
+            {
+                // IN () is invalid SQL — emit a guaranteed-false predicate instead.
+                _sb.Append(" IN (NULL)");
+            }
+            else
+            {
+                _sb.Append(" IN (");
+                _sb.Append(string.Join(", ", paramNames));
+                _sb.Append(')');
+            }
+        }
+
         private void VisitConstant(Expression expression)
         {
             try
@@ -240,38 +284,37 @@ namespace RoboDodd.OrmLite
         {
             if (node.Method.Name == "Contains")
             {
-                // Handle different Contains scenarios
-                if (node.Object != null && node.Arguments.Count == 1)
+                // String.Contains(value) — distinct from Collection.Contains by Type
+                if (node.Object != null && node.Arguments.Count == 1 && node.Object.Type == typeof(string))
                 {
-                    // String.Contains(value) - e.g., u.Email.Contains("@example.com")
                     Visit(node.Object); // The string property (e.g., u.Email)
                     _sb.Append(" LIKE ");
-                    
-                    // Use database-specific concatenation
                     if (_isMySql)
                     {
                         _sb.Append("CONCAT('%', ");
-                        Visit(node.Arguments[0]); // The search value
+                        Visit(node.Arguments[0]);
                         _sb.Append(", '%')");
                     }
                     else
                     {
-                        // SQLite uses || for concatenation
                         _sb.Append("'%' || ");
-                        Visit(node.Arguments[0]); // The search value
+                        Visit(node.Arguments[0]);
                         _sb.Append(" || '%'");
                     }
                 }
-                else if (node.Arguments.Count >= 2)
+                // List<T>.Contains(item) — instance method on a collection
+                else if (node.Object != null && node.Arguments.Count == 1)
                 {
-                    // Collection.Contains(item) - e.g., list.Contains(u.Id)
-                    Visit(node.Arguments[1]);
-                    _sb.Append(" IN ");
-                    Visit(node.Object ?? node.Arguments[0]);
+                    EmitInList(node.Arguments[0], node.Object);
+                }
+                // Enumerable.Contains(source, item) — static extension form
+                else if (node.Object == null && node.Arguments.Count == 2)
+                {
+                    EmitInList(node.Arguments[1], node.Arguments[0]);
                 }
                 else
                 {
-                    throw new NotSupportedException($"Contains method with {node.Arguments.Count} arguments is not supported");
+                    throw new NotSupportedException($"Contains shape (Object={node.Object != null}, args={node.Arguments.Count}) is not supported");
                 }
             }
             else if (node.Method.Name == "StartsWith")

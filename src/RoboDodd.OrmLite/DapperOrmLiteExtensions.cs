@@ -428,6 +428,264 @@ namespace RoboDodd.OrmLite
 
         #endregion
 
+        #region Merge / Seed Operations
+
+        /// <summary>
+        /// Result of a <see cref="MergeAsync{T,TKey}"/> call.
+        /// </summary>
+        public readonly record struct MergeResult(int Inserted, int Updated)
+        {
+            public int Total => Inserted + Updated;
+        }
+
+        /// <summary>
+        /// Upsert a batch of entities by a natural-key property (e.g. Slug, Name, ExternalId).
+        /// For each entity:
+        ///   - If a row exists where the key column equals the entity's key value, copy that row's
+        ///     primary key onto the entity and UPDATE it.
+        ///   - Otherwise INSERT the entity as-is.
+        /// Returns a count of inserts vs updates.
+        /// </summary>
+        /// <example>
+        /// await db.MergeAsync(seedExercises, e =&gt; e.Slug);
+        /// </example>
+        public static async Task<MergeResult> MergeAsync<T, TKey>(
+            this IDbConnection connection,
+            IEnumerable<T> entities,
+            Expression<Func<T, TKey>> keySelector)
+        {
+            if (entities == null) throw new ArgumentNullException(nameof(entities));
+            if (keySelector == null) throw new ArgumentNullException(nameof(keySelector));
+
+            var memberExpr = keySelector.Body as MemberExpression
+                ?? (keySelector.Body is UnaryExpression u ? u.Operand as MemberExpression : null)
+                ?? throw new ArgumentException("keySelector must reference a single property (e.g. e => e.Slug)", nameof(keySelector));
+            return await MergeAsync(connection, entities, memberExpr.Member.Name);
+        }
+
+        /// <summary>
+        /// Upsert a batch of entities by a named column using a server-side staging table.
+        ///
+        /// Pipeline (4 round-trips regardless of batch size):
+        ///   1. CREATE TEMP TABLE __merge_xxx (same columns as target, no constraints)
+        ///   2. Bulk INSERT all entities into the staging table (Dapper batched)
+        ///   3. UPDATE target FROM staging WHERE key matches  — single statement
+        ///   4. INSERT INTO target SELECT FROM staging WHERE key NOT matched — single statement
+        ///
+        /// The matched-row count from step 3 is the Updated count; the affected-row count from
+        /// step 4 is the Inserted count. Existing primary keys are preserved on update; new rows
+        /// keep whatever Id the entity carried in.
+        /// </summary>
+        public static async Task<MergeResult> MergeAsync<T>(
+            this IDbConnection connection,
+            IEnumerable<T> entities,
+            string keyColumnName)
+        {
+            if (entities == null) throw new ArgumentNullException(nameof(entities));
+            if (string.IsNullOrWhiteSpace(keyColumnName)) throw new ArgumentException("keyColumnName is required", nameof(keyColumnName));
+
+            var list = entities.Where(e => e != null).ToList();
+            if (list.Count == 0) return new MergeResult(0, 0);
+
+            var type = typeof(T);
+            if (type.GetProperty(keyColumnName) == null)
+                throw new ArgumentException($"Property '{keyColumnName}' not found on {type.Name}", nameof(keyColumnName));
+            var idColumn = GetIdColumnName<T>();
+            var tableName = GetTableName<T>();
+            var props = GetInsertProperties<T>();
+            var isMySql = connection.GetType().Name.Contains("MySql");
+
+            string esc(string n) => isMySql ? $"`{n}`" : $"\"{n}\"";
+            var escTable   = esc(tableName);
+            var escKey     = esc(keyColumnName);
+            var colNames   = string.Join(", ", props.Select(p => esc(p.Name)));
+            var paramNames = string.Join(", ", props.Select(p => "@" + p.Name));
+            var stagingName = $"__merge_{Guid.NewGuid():N}".Substring(0, 18);
+            var escStaging = esc(stagingName);
+
+            // 1. Empty staging table cloned from target's column shape.
+            var createSql = isMySql
+                ? $"CREATE TEMPORARY TABLE {escStaging} AS SELECT {colNames} FROM {escTable} WHERE 1 = 0"
+                : $"CREATE TEMP TABLE {escStaging} AS SELECT {colNames} FROM {escTable} WHERE 0";
+            await connection.ExecuteAsync(createSql);
+
+            try
+            {
+                // 2. Bulk insert into staging (Dapper batches list parameter into one round-trip).
+                var insertStagingSql = $"INSERT INTO {escStaging} ({colNames}) VALUES ({paramNames})";
+                await connection.ExecuteAsync(insertStagingSql, list);
+
+                // 3. UPDATE target FROM staging. Dialect-specific syntax.
+                var setProps = props.Where(p => p.Name != idColumn && p.Name != keyColumnName).ToArray();
+                int updated = 0;
+                if (setProps.Length > 0)
+                {
+                    string updateSql;
+                    if (isMySql)
+                    {
+                        var setClause = string.Join(", ",
+                            setProps.Select(p => $"t.{esc(p.Name)} = s.{esc(p.Name)}"));
+                        updateSql = $"UPDATE {escTable} t INNER JOIN {escStaging} s ON t.{escKey} = s.{escKey} SET {setClause}";
+                    }
+                    else
+                    {
+                        var setClause = string.Join(", ",
+                            setProps.Select(p => $"{esc(p.Name)} = s.{esc(p.Name)}"));
+                        updateSql = $"UPDATE {escTable} SET {setClause} FROM {escStaging} s WHERE {escTable}.{escKey} = s.{escKey}";
+                    }
+                    updated = await connection.ExecuteAsync(updateSql);
+                }
+                else
+                {
+                    // Nothing to update (table has only the key + id columns) — still count matches.
+                    var countSql = $"SELECT COUNT(*) FROM {escStaging} s WHERE EXISTS (SELECT 1 FROM {escTable} t WHERE t.{escKey} = s.{escKey})";
+                    updated = await connection.ExecuteScalarAsync<int>(countSql);
+                }
+
+                // 4. INSERT non-matching staging rows into target.
+                var insertNewSql =
+                    $"INSERT INTO {escTable} ({colNames}) " +
+                    $"SELECT {string.Join(", ", props.Select(p => "s." + esc(p.Name)))} FROM {escStaging} s " +
+                    $"WHERE NOT EXISTS (SELECT 1 FROM {escTable} t WHERE t.{escKey} = s.{escKey})";
+                var inserted = await connection.ExecuteAsync(insertNewSql);
+
+                return new MergeResult(inserted, updated);
+            }
+            finally
+            {
+                try { await connection.ExecuteAsync($"DROP TABLE {escStaging}"); } catch { /* connection close drops anyway */ }
+            }
+        }
+
+        /// <summary>
+        /// Synchronous wrapper around <see cref="MergeAsync{T,TKey}"/> — convenient for boot-time
+        /// seeding code where you don't want to make the caller async.
+        /// </summary>
+        public static MergeResult Merge<T, TKey>(
+            this IDbConnection connection,
+            IEnumerable<T> entities,
+            Expression<Func<T, TKey>> keySelector)
+            => MergeAsync(connection, entities, keySelector).GetAwaiter().GetResult();
+
+        /// <summary>
+        /// Synchronous wrapper around <see cref="MergeAsync{T}(IDbConnection, IEnumerable{T}, string)"/>.
+        /// </summary>
+        public static MergeResult Merge<T>(
+            this IDbConnection connection,
+            IEnumerable<T> entities,
+            string keyColumnName)
+            => MergeAsync(connection, entities, keyColumnName).GetAwaiter().GetResult();
+
+        // ---------- Tracked seeds (idempotent migration-style) ----------
+
+        private const string SeedHistoryTable = "__RoboDoddSeedHistory";
+        private static int _seedTableEnsured; // 0 = not ensured, 1 = ensured
+
+        private static async Task EnsureSeedHistoryTableAsync(IDbConnection connection)
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref _seedTableEnsured, 1, 0) == 1) return;
+            var isMySql = connection.GetType().Name.Contains("MySql");
+            var sql = isMySql
+                ? $"CREATE TABLE IF NOT EXISTS `{SeedHistoryTable}` (`Id` CHAR(36) NOT NULL PRIMARY KEY, `Name` VARCHAR(255), `AppliedAt` DATETIME NOT NULL)"
+                : $"CREATE TABLE IF NOT EXISTS \"{SeedHistoryTable}\" (\"Id\" TEXT NOT NULL PRIMARY KEY, \"Name\" TEXT, \"AppliedAt\" TEXT NOT NULL)";
+            await connection.ExecuteAsync(sql);
+        }
+
+        private static (string table, string id, string name, string at) SeedHistorySqlNames(IDbConnection connection)
+        {
+            var isMySql = connection.GetType().Name.Contains("MySql");
+            return isMySql
+                ? ($"`{SeedHistoryTable}`", "`Id`", "`Name`", "`AppliedAt`")
+                : ($"\"{SeedHistoryTable}\"", "\"Id\"", "\"Name\"", "\"AppliedAt\"");
+        }
+
+        /// <summary>
+        /// Returns true if a seed with the given Guid has been recorded in <c>__RoboDoddSeedHistory</c>.
+        /// </summary>
+        public static async Task<bool> HasSeedAsync(this IDbConnection connection, Guid seedId)
+        {
+            await EnsureSeedHistoryTableAsync(connection);
+            var (table, id, _, _) = SeedHistorySqlNames(connection);
+            var sql = $"SELECT 1 FROM {table} WHERE {id} = @id";
+            var rows = await connection.QueryAsync<int>(sql, new { id = seedId.ToString() });
+            return rows.Any();
+        }
+
+        public static bool HasSeed(this IDbConnection connection, Guid seedId)
+            => HasSeedAsync(connection, seedId).GetAwaiter().GetResult();
+
+        /// <summary>
+        /// Run <paramref name="action"/> once, keyed by <paramref name="seedId"/>. On success,
+        /// records the Guid in <c>__RoboDoddSeedHistory</c> so subsequent calls become no-ops.
+        /// Returns true if the action ran, false if it was skipped because the seed was already applied.
+        /// </summary>
+        /// <example>
+        /// await db.SeedOnceAsync(
+        ///     Guid.Parse("a1b2c3d4-0000-0000-0000-000000000001"),
+        ///     "Exercise library v1",
+        ///     async db => { await db.MergeAsync(exercises, e =&gt; e.Slug); });
+        /// </example>
+        public static async Task<bool> SeedOnceAsync(
+            this IDbConnection connection,
+            Guid seedId,
+            string name,
+            Func<IDbConnection, Task> action)
+        {
+            if (action == null) throw new ArgumentNullException(nameof(action));
+            await EnsureSeedHistoryTableAsync(connection);
+            if (await HasSeedAsync(connection, seedId)) return false;
+
+            await action(connection);
+
+            var (table, idCol, nameCol, atCol) = SeedHistorySqlNames(connection);
+            var insertSql = $"INSERT INTO {table} ({idCol}, {nameCol}, {atCol}) VALUES (@id, @name, @at)";
+            await connection.ExecuteAsync(insertSql, new
+            {
+                id = seedId.ToString(),
+                name = name ?? string.Empty,
+                at = DateTime.UtcNow,
+            });
+            return true;
+        }
+
+        public static bool SeedOnce(
+            this IDbConnection connection,
+            Guid seedId,
+            string name,
+            Action<IDbConnection> action)
+            => SeedOnceAsync(connection, seedId, name, db => { action(db); return Task.CompletedTask; })
+                .GetAwaiter().GetResult();
+
+        /// <summary>
+        /// Tracked merge — runs <see cref="MergeAsync{T,TKey}"/> only if <paramref name="seedId"/>
+        /// hasn't been applied yet. On success the Guid is recorded so future boots skip the work.
+        /// </summary>
+        /// <returns>true with the merge result on first run; false + default result if skipped.</returns>
+        public static async Task<(bool Ran, MergeResult Result)> MergeOnceAsync<T, TKey>(
+            this IDbConnection connection,
+            Guid seedId,
+            string name,
+            IEnumerable<T> entities,
+            Expression<Func<T, TKey>> keySelector)
+        {
+            MergeResult result = default;
+            var ran = await SeedOnceAsync(connection, seedId, name, async db =>
+            {
+                result = await db.MergeAsync(entities, keySelector);
+            });
+            return (ran, result);
+        }
+
+        public static (bool Ran, MergeResult Result) MergeOnce<T, TKey>(
+            this IDbConnection connection,
+            Guid seedId,
+            string name,
+            IEnumerable<T> entities,
+            Expression<Func<T, TKey>> keySelector)
+            => MergeOnceAsync(connection, seedId, name, entities, keySelector).GetAwaiter().GetResult();
+
+        #endregion
+
         #region Delete Operations
 
         public static async Task<int> DeleteAsync<T>(this IDbConnection connection, T entity)
