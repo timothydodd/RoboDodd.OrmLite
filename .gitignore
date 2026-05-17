@@ -323,3 +323,6 @@ ASALocalRun/
 
 # BeatPulse healthcheck temp database
 healthchecksdb
+
+# JetBrains Rider lightspeed cache
+*.lscache
