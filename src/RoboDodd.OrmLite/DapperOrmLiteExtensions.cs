@@ -1440,9 +1440,16 @@ namespace RoboDodd.OrmLite
                 sqlType = isMySql ? "CHAR(36)" : "TEXT";
             else if (propType == typeof(string))
             {
-                var maxLengthAttr = prop.GetCustomAttribute<MaxLengthAttribute>();
-                if (maxLengthAttr != null)
-                    sqlType = $"VARCHAR({maxLengthAttr.Length})";
+                var length = prop.GetCustomAttribute<MaxLengthAttribute>()?.Length
+                    ?? prop.GetCustomAttribute<StringLengthAttribute>()?.MaximumLength;
+                if (length is > 0)
+                    sqlType = $"VARCHAR({length})";
+                else if (isMySql &&
+                         (Attribute.IsDefined(prop, typeof(KeyAttribute))
+                          || Attribute.IsDefined(prop, typeof(PrimaryKeyAttribute))
+                          || prop.GetCustomAttribute<IndexAttribute>() != null))
+                    // MySQL can't index/key a TEXT column without a prefix length; fall back to VARCHAR.
+                    sqlType = "VARCHAR(255)";
                 else
                     sqlType = "TEXT";
             }
@@ -1560,9 +1567,16 @@ namespace RoboDodd.OrmLite
                     sqlType = isMySql ? "CHAR(36)" : "TEXT";
                 else if (propType == typeof(string))
                 {
-                    var maxLengthAttr = prop.GetCustomAttribute<MaxLengthAttribute>();
-                    if (maxLengthAttr != null)
-                        sqlType = $"VARCHAR({maxLengthAttr.Length})";
+                    var length = prop.GetCustomAttribute<MaxLengthAttribute>()?.Length
+                        ?? prop.GetCustomAttribute<StringLengthAttribute>()?.MaximumLength;
+                    if (length is > 0)
+                        sqlType = $"VARCHAR({length})";
+                    else if (isMySql &&
+                             (Attribute.IsDefined(prop, typeof(KeyAttribute))
+                              || Attribute.IsDefined(prop, typeof(PrimaryKeyAttribute))
+                              || prop.GetCustomAttribute<IndexAttribute>() != null))
+                        // MySQL can't index/key a TEXT column without a prefix length; fall back to VARCHAR.
+                        sqlType = "VARCHAR(255)";
                     else
                         sqlType = "TEXT";
                 }
