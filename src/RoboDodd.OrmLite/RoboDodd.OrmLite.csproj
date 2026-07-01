@@ -11,6 +11,9 @@
   <ItemGroup>
     <PackageReference Include="Dapper" Version="2.1.79" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <!-- Pin the SQLite native bundle above the vulnerable 2.1.11 that Microsoft.Data.Sqlite
+         pulls transitively (GHSA-2m69-gcr7-jv3q / NU1903). -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageReference Include="MySql.Data" Version="9.7.0" />
     <PackageReference Include="System.ComponentModel.Annotations" Version="5.0.0" />
   </ItemGroup>
