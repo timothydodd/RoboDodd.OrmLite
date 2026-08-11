@@ -1192,30 +1192,14 @@ namespace RoboDodd.OrmLite
 
         private static string EscapeColumnName(string columnName, bool isMySql)
         {
-            // For MySQL, always escape column names to avoid issues with case sensitivity and reserved words
+            // Always escape column names to avoid issues with case sensitivity and
+            // reserved words (e.g. "To" and "From" are keywords in both dialects)
             if (isMySql)
             {
                 return $"`{columnName}`";
             }
-            
-            // For SQLite, only escape reserved keywords
-            var reservedKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "Order", "Group", "Select", "From", "Where", "Insert", "Update", "Delete",
-                "Table", "Column", "Index", "Key", "Value", "Name", "Type", "Date", "Time",
-                "User", "System", "Database", "Schema", "View", "Primary", "Foreign",
-                "References", "Check", "Default", "Unique", "Not", "Null", "Is", "In",
-                "And", "Or", "Like", "Between", "Exists", "Having", "Count", "Sum",
-                "Min", "Max", "Avg", "Distinct", "All", "Any", "Some", "Union", "Join",
-                "Inner", "Left", "Right", "Full", "Outer", "On", "As", "Desc", "Asc"
-            };
 
-            if (reservedKeywords.Contains(columnName))
-            {
-                return $"[{columnName}]";
-            }
-
-            return columnName;
+            return $"[{columnName}]";
         }
 
         #endregion
@@ -1266,6 +1250,12 @@ namespace RoboDodd.OrmLite
             // Create table
             var sql = BuildCreateTableSql<T>(isMySql);
             connection.Execute(sql);
+
+            // Create declared [Index]/[CompositeIndex] indexes for the new table
+            foreach (var indexSql in BuildIndexSqls<T>(tableName, isMySql))
+            {
+                connection.Execute(indexSql);
+            }
             return true;
         }
 
@@ -1303,6 +1293,12 @@ namespace RoboDodd.OrmLite
             // Create table
             var sql = BuildCreateTableSql<T>(isMySql);
             await connection.ExecuteAsync(sql);
+
+            // Create declared [Index]/[CompositeIndex] indexes for the new table
+            foreach (var indexSql in BuildIndexSqls<T>(tableName, isMySql))
+            {
+                await connection.ExecuteAsync(indexSql);
+            }
             return true;
         }
 
